@@ -1,0 +1,20 @@
+# Usability: create a calendar event and find it with search
+# App: demo_app/calendar.html (http://localhost:3000/calendar.html)
+# Covers: new-event modal, required fields, category choice, search filter
+
+1. Go to http://localhost:3000/calendar.html
+2. Assert the calendar month view is visible
+3. Click + New event
+4. Type Vendor kickoff call into the event title field
+5. Set the event date to 2026-07-16
+6. Set the start time to 10:00
+7. Set the end time to 10:30
+8. Select the Work category
+9. Type Confirm agenda and attendees into the notes field
+10. Click Add event
+11. Assert a toast confirms the event was created
+12. Type Vendor kickoff into the Search events field
+13. Assert Vendor kickoff call appears on the calendar
+14. Click the Vendor kickoff call event
+15. Assert the edit event dialog shows Vendor kickoff call as the title
+16. Click Cancel to close the dialog

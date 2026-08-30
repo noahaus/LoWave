@@ -150,6 +150,10 @@ The steps LLM cannot see the DOM, so its selectors are guesses. `qa-refine` open
 │   └── calendar.html       # calendar (no login)
 ├── examples/               # sample steps + plans to try immediately
 │   ├── kestrel_login_steps.txt
+│   ├── workflows/          # usability workflows for the demo apps
+│   │   ├── login_and_search_report.txt
+│   │   ├── create_expense_report.txt
+│   │   └── calendar_create_event.txt
 │   ├── action_plan.json
 │   └── refined_action_plan.json
 ├── tests/                  # generated Playwright specs land here

@@ -1,0 +1,25 @@
+# Usability: create and submit a new expense report
+# App: demo_app/index.html (http://localhost:3000)
+# Covers: multi-step wizard, validation paths avoided with valid input, submit feedback
+
+1. Go to the app home page
+2. Type demo@kestrel.app into the work email field
+3. Type test1234 into the password field
+4. Click Sign in
+5. Click New report on the dashboard
+6. Type Seattle customer workshop into the report title field
+7. Set the trip date to 2026-07-10
+8. Select Travel from the category dropdown
+9. Type On-site workshop with Acme into the notes field
+10. Click Continue
+11. Type Airport rideshare into the first line item description
+12. Type 48.50 into the first line item amount
+13. Click Add line item
+14. Type Hotel — 1 night into the second line item description
+15. Type 189.00 into the second line item amount
+16. Assert the wizard total reflects both line items
+17. Click Review
+18. Assert the review step shows Seattle customer workshop
+19. Click Submit for approval
+20. Assert you land back on the Reports list
+21. Assert a report titled Seattle customer workshop is visible

@@ -1,0 +1,15 @@
+# Usability: sign in and find a report by search
+# App: demo_app/index.html (http://localhost:3000)
+# Covers: login clarity, sidebar nav, reports search, opening a result
+
+1. Go to the app home page
+2. Type demo@kestrel.app into the work email field
+3. Type test1234 into the password field
+4. Click Sign in
+5. Assert the Dashboard heading is visible
+6. Click Reports in the sidebar navigation
+7. Type NYC into the Search reports field
+8. Assert the reports table shows NYC client visit — Q2 review
+9. Click the NYC client visit — Q2 review row
+10. Assert the report detail shows status Pending
+11. Click Back to reports
