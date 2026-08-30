@@ -1,0 +1,95 @@
+{
+  "workflow": {
+    "title": "Test 1",
+    "application": "Kestrel - Expense Reports",
+    "base_url": "http://localhost:63837/",
+    "summary": "Navigates to Kestrel application, logs in with demo credentials, views report details and navigates back."
+  },
+  "steps": [
+    {
+      "step": 1,
+      "id": "navigate",
+      "action": "navigate",
+      "description": "Navigate to the web app at http://localhost:63837/",
+      "target": {
+        "css_selector": "#app-root"
+      },
+      "expected_outcome": {}
+    },
+    {
+      "step": 2,
+      "id": "type_login_email",
+      "action": "type",
+      "description": "Type 'demo@kestrel.app' into the email input field.",
+      "target": {
+        "css_selector": "#email-input"
+      },
+      "input_value": "demo@kestrel.app",
+      "expected_outcome": {}
+    },
+    {
+      "step": 3,
+      "id": "type_login_password",
+      "action": "type",
+      "description": "Type 'test1234' into the password input field.",
+      "target": {
+        "css_selector": "#password-input"
+      },
+      "input_value": "test1234",
+      "expected_outcome": {}
+    },
+    {
+      "step": 4,
+      "id": "click_login_button",
+      "action": "click",
+      "description": "Click the 'Sign in' button to log into the application.",
+      "target": {
+        "css_selector": "#login-button"
+      },
+      "expected_outcome": {}
+    },
+    {
+      "step": 5,
+      "id": "click_report_details",
+      "action": "click",
+      "description": "Click on a report detail link or element to view more information about an expense report.",
+      "target": {
+        "css_selector": "#report-details-link"
+      },
+      "expected_outcome": {}
+    },
+    {
+      "step": 6,
+      "id": "click_back_to_reports",
+      "action": "click",
+      "description": "Click the 'Back to reports' button to return to the list of all expense reports.",
+      "target": {
+        "css_selector": "#back-to-reports-button"
+      },
+      "expected_outcome": {}
+    },
+    {
+      "step": 7,
+      "id": "terminate_session",
+      "action": "terminate",
+      "description": "End the session.",
+      "expected_outcome": {}
+    }
+  ],
+  "metadata": {
+    "total_steps": 7,
+    "known_ambiguities": [
+      {
+        "id": "report_details_link",
+        "steps_affected": [
+          5
+        ],
+        "description": "The exact link or element to click for report details is not visible in the video."
+      }
+    ],
+    "recommended_edge_cases": [
+      "Ensure that all links and buttons are clearly visible before clicking.",
+      "Verify if there are any additional steps required after viewing a report detail, such as submitting changes or closing the window."
+    ]
+  }
+}

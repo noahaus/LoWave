@@ -1,0 +1,20 @@
+# Core dependencies for the QA pipeline.
+#   pip install -r requirements.txt
+#
+# This installs the shared core plus the default Anthropic backend. To use a
+# different LLM provider, install one of the alternatives listed at the bottom
+# (or use the extras defined in pyproject.toml, e.g. pip install -e ".[openai]").
+
+# ── shared core ──────────────────────────────────────────
+pydantic>=2.0
+langchain-core>=0.3
+python-dotenv>=1.0        # optional .env loading (config.py degrades gracefully without it)
+playwright>=1.40          # required by refine_plan.py for live-DOM grounding
+
+# ── default backend (Anthropic) ──────────────────────────
+langchain-anthropic>=0.2
+
+# ── alternative backends (uncomment the one you want) ────
+# langchain-openai>=0.2
+# langchain-google-genai>=2.0
+# langchain-ollama>=0.2

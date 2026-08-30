@@ -1,0 +1,201 @@
+{
+  "workflow": {
+    "title": "Test 1",
+    "application": "Kestrel - Expense Reports",
+    "base_url": "http://localhost:63837/",
+    "summary": "Navigates to Kestrel application, logs in with demo credentials, views report details and navigates back."
+  },
+  "steps": [
+    {
+      "step": 1,
+      "id": "navigate",
+      "action": "navigate",
+      "description": "Navigate to the web app at http://localhost:63837/",
+      "value": "http://localhost:63837/",
+      "target": {
+        "playwright_locator": "get_by_test_id(\"login-email\")",
+        "strategy": "testid",
+        "locator_value": "login-email",
+        "role": null,
+        "css_selector": null,
+        "original_selector": "#app-root"
+      },
+      "expected_outcome": {
+        "assertion": "Navigate to the web app at http://localhost:63837/",
+        "assert_values": []
+      },
+      "refinement": {
+        "confidence": 0.95,
+        "grounded": true,
+        "executed": true,
+        "reclassified": false,
+        "notes": null
+      }
+    },
+    {
+      "step": 2,
+      "id": "type_login_email",
+      "action": "type",
+      "description": "Type 'demo@kestrel.app' into the email input field.",
+      "value": "demo@kestrel.app",
+      "target": {
+        "playwright_locator": "get_by_test_id(\"login-email\")",
+        "strategy": "testid",
+        "locator_value": "login-email",
+        "role": null,
+        "css_selector": null,
+        "original_selector": "#email-input"
+      },
+      "expected_outcome": {
+        "assertion": "Type 'demo@kestrel.app' into the email input field.",
+        "assert_values": []
+      },
+      "refinement": {
+        "confidence": 0.95,
+        "grounded": true,
+        "executed": true,
+        "reclassified": false,
+        "notes": null
+      }
+    },
+    {
+      "step": 3,
+      "id": "type_login_password",
+      "action": "type",
+      "description": "Type 'test1234' into the password input field.",
+      "value": "test1234",
+      "target": {
+        "playwright_locator": "get_by_test_id(\"login-password\")",
+        "strategy": "testid",
+        "locator_value": "login-password",
+        "role": null,
+        "css_selector": null,
+        "original_selector": "#password-input"
+      },
+      "expected_outcome": {
+        "assertion": "Type 'test1234' into the password input field.",
+        "assert_values": []
+      },
+      "refinement": {
+        "confidence": 0.95,
+        "grounded": true,
+        "executed": true,
+        "reclassified": false,
+        "notes": null
+      }
+    },
+    {
+      "step": 4,
+      "id": "click_login_button",
+      "action": "click",
+      "description": "Click the 'Sign in' button to log into the application.",
+      "value": null,
+      "target": {
+        "playwright_locator": "get_by_test_id(\"login-submit\")",
+        "strategy": "testid",
+        "locator_value": "login-submit",
+        "role": null,
+        "css_selector": null,
+        "original_selector": "#login-button"
+      },
+      "expected_outcome": {
+        "assertion": "Click the 'Sign in' button to log into the application.",
+        "assert_values": []
+      },
+      "refinement": {
+        "confidence": 0.95,
+        "grounded": true,
+        "executed": true,
+        "reclassified": false,
+        "notes": null
+      }
+    },
+    {
+      "step": 5,
+      "id": "click_report_details",
+      "action": "click",
+      "description": "Click on a report detail link or element to view more information about an expense report.",
+      "value": null,
+      "target": {
+        "playwright_locator": "get_by_test_id(\"nav-reports\")",
+        "strategy": "testid",
+        "locator_value": "nav-reports",
+        "role": null,
+        "css_selector": null,
+        "original_selector": "#report-details-link"
+      },
+      "expected_outcome": {
+        "assertion": "Click on a report detail link or element to view more information about an expense report.",
+        "assert_values": []
+      },
+      "refinement": {
+        "confidence": 0.9,
+        "grounded": true,
+        "executed": true,
+        "reclassified": false,
+        "notes": null
+      }
+    },
+    {
+      "step": 6,
+      "id": "click_back_to_reports",
+      "action": "click",
+      "description": "Click the 'Back to reports' button to return to the list of all expense reports.",
+      "value": null,
+      "target": {
+        "playwright_locator": "get_by_test_id(\"nav-reports\")",
+        "strategy": "testid",
+        "locator_value": "nav-reports",
+        "role": null,
+        "css_selector": null,
+        "original_selector": "#back-to-reports-button"
+      },
+      "expected_outcome": {
+        "assertion": "Click the 'Back to reports' button to return to the list of all expense reports.",
+        "assert_values": []
+      },
+      "refinement": {
+        "confidence": 0.9,
+        "grounded": true,
+        "executed": true,
+        "reclassified": false,
+        "notes": null
+      }
+    },
+    {
+      "step": 7,
+      "id": "terminate_session",
+      "action": "terminate",
+      "description": "End the session.",
+      "value": null,
+      "target": {
+        "playwright_locator": "locator(\"n/a\")",
+        "strategy": "css",
+        "locator_value": "n/a",
+        "role": null,
+        "css_selector": "n/a",
+        "original_selector": null
+      },
+      "expected_outcome": {
+        "assertion": "End the session.",
+        "assert_values": []
+      },
+      "refinement": {
+        "confidence": 1.0,
+        "grounded": true,
+        "executed": true,
+        "reclassified": false,
+        "notes": null
+      }
+    }
+  ],
+  "metadata": {
+    "total_steps": 7,
+    "known_ambiguities": [],
+    "recommended_edge_cases": [
+      "Ensure that all links and buttons are clearly visible before clicking.",
+      "Verify if there are any additional steps required after viewing a report detail, such as submitting changes or closing the window."
+    ],
+    "refined": true
+  }
+}

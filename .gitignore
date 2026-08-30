@@ -1,0 +1,42 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ── Secrets / local config ──────────────────────────────
+.env
+.env.local
+
+# ── Node / Playwright ───────────────────────────────────
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+# ── Pipeline outputs (generated at run time) ────────────
+# Committed reference copies live in examples/ instead.
+/action_plan.json
+/refined_action_plan.json
+
+# ── Large media (use Git LFS if you need to track these) ─
+*.mp4
+*.mov
+*.webm
+
+# ── OS / editor cruft ───────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

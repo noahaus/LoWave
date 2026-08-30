@@ -1,0 +1,8 @@
+# Login and open first report
+1. Go to the app home page
+2. Type demo@kestrel.app into the email field
+3. Type test1234 into the password field
+4. Click Sign in
+5. Open the first expense report in the table
+6. Assert the report detail view is visible
+7. Click Back to reports

@@ -1,0 +1,24 @@
+{
+  "name": "webapp-qa-pipeline",
+  "version": "0.1.0",
+  "description": "Turn numbered workflow steps into a runnable Playwright test: parse -> refine -> generate.",
+  "license": "MIT",
+  "type": "commonjs",
+  "scripts": {
+    "serve": "npx serve demo_app -l 3000",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "report": "playwright show-report"
+  },
+  "keywords": [
+    "playwright",
+    "qa",
+    "test-generation",
+    "llm",
+    "e2e"
+  ],
+  "devDependencies": {
+    "@playwright/test": "^1.61.0",
+    "@types/node": "^25.9.3"
+  }
+}
