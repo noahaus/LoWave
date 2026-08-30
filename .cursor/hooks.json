@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/protect-git.sh",
+        "matcher": "git\\s+(push|reset|rebase|clean)",
+        "failClosed": false
+      }
+    ]
+  }
+}
