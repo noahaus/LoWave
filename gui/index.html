@@ -14,87 +14,131 @@
   <div class="app">
     <header class="hero">
       <p class="brand">Kestrel QA Pipeline</p>
-      <h1>Steps to Playwright</h1>
-      <p class="lede">Pick a numbered steps file, run parse → refine → generate, and get a Playwright spec.</p>
+      <h1>Projects to Playwright</h1>
+      <p class="lede">Create a project for the web app under test, add numbered steps files, then run parse → refine → generate.</p>
     </header>
 
-    <main class="layout">
-      <section class="panel controls">
-        <label class="field">
-          <span>Steps file</span>
-          <div class="row">
-            <input id="stepsPath" type="text" readonly placeholder="Choose a .txt workflow…" />
-            <button type="button" id="browseBtn" class="btn ghost">Browse</button>
+    <section id="view-home">
+      <div class="layout home-layout">
+        <section class="panel">
+          <h2>New project</h2>
+          <p class="hint">A project is a container for one web app. Add as many steps files as you need after you create it.</p>
+          <label class="field">
+            <span>Project name</span>
+            <input id="newName" type="text" placeholder="Expense app" />
+          </label>
+          <label class="field">
+            <span>Web app URL</span>
+            <input id="newBaseUrl" type="text" value="http://localhost:3000" />
+          </label>
+          <label class="field">
+            <span>Username (optional)</span>
+            <input id="newUsername" type="text" placeholder="demo@kestrel.app" />
+          </label>
+          <div class="actions">
+            <button type="button" id="createBtn" class="btn primary">Create project</button>
           </div>
-        </label>
+          <p id="homeStatus" class="status" aria-live="polite"></p>
+        </section>
 
-        <label class="field">
-          <span>Example workflows</span>
-          <select id="examples"></select>
-        </label>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Projects</h2>
+          </div>
+          <div id="projectCards" class="card-grid"></div>
+        </section>
+      </div>
+    </section>
 
-        <div class="grid2">
+    <section id="view-project" hidden>
+      <div class="project-banner">
+        <button type="button" id="backBtn" class="btn ghost">Back to projects</button>
+        <div class="project-banner-fields">
           <label class="field">
-            <span>Base URL</span>
-            <input id="baseUrl" type="text" value="http://localhost:3000" />
+            <span>Project</span>
+            <input id="projName" type="text" />
           </label>
           <label class="field">
-            <span>Backend</span>
-            <select id="backend">
-              <option value="ollama" selected>ollama</option>
-              <option value="anthropic">anthropic</option>
-              <option value="openai">openai</option>
-              <option value="google">google</option>
-            </select>
+            <span>Web app URL</span>
+            <input id="projBaseUrl" type="text" />
           </label>
-        </div>
-
-        <div class="grid2">
-          <label class="field">
-            <span>Model</span>
-            <input id="model" type="text" value="qwen3-coder:30b" />
-          </label>
-          <label class="field">
-            <span>Spec name (optional)</span>
-            <input id="specName" type="text" placeholder="from steps filename" />
-          </label>
-        </div>
-
-        <div class="grid2">
           <label class="field">
             <span>Username</span>
-            <input id="username" type="text" value="demo@kestrel.app" />
+            <input id="projUsername" type="text" />
           </label>
+          <button type="button" id="saveProjBtn" class="btn ghost">Save</button>
+        </div>
+      </div>
+
+      <div class="layout">
+        <section class="panel controls">
+          <h2>Steps files</h2>
+          <div id="stepsList" class="steps-list"></div>
+
           <label class="field">
-            <span>Password</span>
-            <input id="password" type="password" value="test1234" />
+            <span>New steps file name</span>
+            <div class="row">
+              <input id="newStepsName" type="text" placeholder="login_flow" />
+              <button type="button" id="createStepsBtn" class="btn ghost">Create</button>
+            </div>
           </label>
-        </div>
+          <div class="actions wrap">
+            <button type="button" id="importBtn" class="btn ghost">Import .txt</button>
+          </div>
 
-        <fieldset class="stages">
-          <legend>Stages</legend>
-          <label><input type="checkbox" id="doParse" checked /> Parse</label>
-          <label><input type="checkbox" id="doRefine" checked /> Refine</label>
-          <label><input type="checkbox" id="doGenerate" checked /> Generate</label>
-          <label><input type="checkbox" id="doTest" /> Run Playwright</label>
-        </fieldset>
+          <div class="grid2">
+            <label class="field">
+              <span>Backend</span>
+              <select id="backend">
+                <option value="ollama" selected>ollama</option>
+                <option value="anthropic">anthropic</option>
+                <option value="openai">openai</option>
+                <option value="google">google</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Model</span>
+              <input id="model" type="text" value="qwen3-coder:30b" />
+            </label>
+          </div>
 
-        <div class="actions">
-          <button type="button" id="runBtn" class="btn primary">Run pipeline</button>
-          <p id="status" class="status" aria-live="polite">Idle</p>
-        </div>
-      </section>
+          <div class="grid2">
+            <label class="field">
+              <span>Password</span>
+              <input id="password" type="password" value="test1234" />
+            </label>
+            <label class="field">
+              <span>Spec name (optional)</span>
+              <input id="specName" type="text" placeholder="from steps filename" />
+            </label>
+          </div>
 
-      <section class="panel preview">
-        <div class="panel-head">
-          <h2>Steps preview</h2>
-          <span id="stagePills" class="pills"></span>
-        </div>
-        <pre id="stepsPreview" class="preview-box">Select a steps file to preview.</pre>
-        <h2>Log</h2>
-        <pre id="log" class="log"></pre>
-      </section>
-    </main>
+          <fieldset class="stages">
+            <legend>Stages</legend>
+            <label><input type="checkbox" id="doParse" checked /> Parse</label>
+            <label><input type="checkbox" id="doRefine" checked /> Refine</label>
+            <label><input type="checkbox" id="doGenerate" checked /> Generate</label>
+            <label><input type="checkbox" id="doTest" /> Run Playwright</label>
+          </fieldset>
+
+          <div class="actions">
+            <button type="button" id="runBtn" class="btn primary">Run pipeline</button>
+            <button type="button" id="cancelBtn" class="btn danger" disabled>Cancel</button>
+            <p id="status" class="status" aria-live="polite">Idle</p>
+          </div>
+        </section>
+
+        <section class="panel preview">
+          <div class="panel-head">
+            <h2>Steps preview</h2>
+            <span id="stagePills" class="pills"></span>
+          </div>
+          <pre id="stepsPreview" class="preview-box">Select a steps file to preview.</pre>
+          <h2>Log</h2>
+          <pre id="log" class="log"></pre>
+        </section>
+      </div>
+    </section>
   </div>
   <script src="renderer.js"></script>
 </body>

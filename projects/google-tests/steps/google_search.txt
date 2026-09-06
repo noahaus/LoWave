@@ -1,0 +1,21 @@
+# Usability: search Google and open a result
+# App: Google Search (https://www.google.com)
+# Covers: homepage search box, results page, query refinement, result navigation
+
+1. Go to https://www.google.com
+2. Assert the search input field is visible
+3. Type Playwright testing tutorial into the search field
+4. Press Enter to submit the search
+5. Assert the results page loads and shows a list of search results
+6. Assert the search field on the results page still contains Playwright testing tutorial
+7. Click the "Images" tab
+8. Assert the page switches to an image results view
+9. Click the "All" tab to return to standard results
+10. Assert the standard results list is visible again
+11. Clear the search field and type Playwright codegen into it
+12. Press Enter to submit the refined search
+13. Assert the results update to reflect the new query
+14. Click the first organic search result
+15. Assert the browser navigates away from the Google results page
+16. Go back to the previous page
+17. Assert the search results for Playwright codegen are visible again

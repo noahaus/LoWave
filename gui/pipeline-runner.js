@@ -17,8 +17,43 @@ function resolveCli(name) {
   return name; // fall back to PATH
 }
 
-function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine } = {}) {
+function stopChild(child) {
+  if (!child || child.killed || child.exitCode != null) return;
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/pid", String(pid), "/T", "/F"]);
+    return;
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // already gone
+  }
+  setTimeout(() => {
+    try {
+      if (child.exitCode == null) process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }, 800);
+}
+
+function cancelledError(stdout = "", stderr = "") {
+  const err = new Error("Pipeline cancelled");
+  err.cancelled = true;
+  err.stdout = stdout;
+  err.stderr = stderr;
+  return err;
+}
+
+function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(cancelledError());
+      return;
+    }
+
     const child = spawn(bin, args, {
       cwd,
       env: { ...process.env, ...env, PYTHONUNBUFFERED: "1" },
@@ -36,6 +71,9 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine } = {}) {
 
     let stdout = "";
     let stderr = "";
+    const onAbort = () => stopChild(child);
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+
     child.stdout.on("data", (d) => {
       stdout += d;
       push(d, "stdout");
@@ -44,8 +82,16 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine } = {}) {
       stderr += d;
       push(d, "stderr");
     });
-    child.on("error", reject);
+    child.on("error", (err) => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      reject(err);
+    });
     child.on("close", (code) => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (signal?.aborted) {
+        reject(cancelledError(stdout, stderr));
+        return;
+      }
       if (code === 0) resolve({ code, stdout, stderr });
       else {
         const err = new Error(`${path.basename(bin)} exited with code ${code}`);
@@ -72,6 +118,7 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine } = {}) {
  * @param {boolean} [opts.runTests]
  * @param {string} [opts.specName]
  * @param {(evt: object) => void} [opts.onEvent]
+ * @param {AbortSignal} [opts.signal]
  */
 async function runPipeline(opts) {
   const {
@@ -87,6 +134,7 @@ async function runPipeline(opts) {
     runTests = false,
     specName,
     onEvent = () => {},
+    signal,
   } = opts;
 
   if (!stepsPath) {
@@ -116,6 +164,11 @@ async function runPipeline(opts) {
   const log = (line, stream = "stdout") =>
     onEvent({ type: "log", stream, line });
 
+  const throwIfCancelled = () => {
+    if (signal?.aborted) throw cancelledError();
+  };
+
+  throwIfCancelled();
   if (parse) {
     emit("parse", "running", "steps → action_plan.json");
     const args = [
@@ -127,10 +180,11 @@ async function runPipeline(opts) {
     ];
     if (username) args.push("--username", username);
     if (password) args.push("--password", password);
-    await runCommand(resolveCli("qa-parse"), args, { onLine: log });
+    await runCommand(resolveCli("qa-parse"), args, { onLine: log, signal });
     emit("parse", "done", actionPlan);
   }
 
+  throwIfCancelled();
   if (refine) {
     emit("refine", "running", "grounding against live DOM");
     const args = [
@@ -142,21 +196,23 @@ async function runPipeline(opts) {
       baseUrl,
       ...llmArgs,
     ];
-    await runCommand(resolveCli("qa-refine"), args, { onLine: log });
+    await runCommand(resolveCli("qa-refine"), args, { onLine: log, signal });
     emit("refine", "done", refinedPlan);
   }
 
+  throwIfCancelled();
   if (generate) {
     emit("generate", "running", "plan → Playwright spec");
     const planIn = refine && fs.existsSync(refinedPlan) ? refinedPlan : actionPlan;
     await runCommand(
       resolveCli("qa-generate"),
       [planIn, specPath, "--base-url", baseUrl],
-      { onLine: log }
+      { onLine: log, signal }
     );
     emit("generate", "done", specPath);
   }
 
+  throwIfCancelled();
   if (runTests) {
     emit("test", "running", specPath);
     await runCommand(
@@ -165,6 +221,7 @@ async function runPipeline(opts) {
       {
         onLine: log,
         env: { QA_SLOWMO: "0", QA_BASE_URL: baseUrl },
+        signal,
       }
     );
     emit("test", "done", specPath);

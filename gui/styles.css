@@ -66,8 +66,13 @@ html, body {
   gap: 16px;
 }
 
+.home-layout {
+  grid-template-columns: minmax(280px, 360px) 1fr;
+}
+
 @media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout,
+  .home-layout { grid-template-columns: 1fr; }
 }
 
 .panel {
@@ -190,6 +195,12 @@ select {
   background: transparent;
 }
 
+.btn.danger {
+  background: transparent;
+  border-color: var(--err);
+  color: var(--err);
+}
+
 .status {
   margin: 0;
   font-size: 13px;
@@ -247,3 +258,122 @@ select {
 .pill.running { border-color: #d4a017; color: var(--warn); }
 .pill.done { border-color: var(--ok); color: var(--ok); }
 .pill.failed { border-color: var(--err); color: var(--err); }
+.pill.cancelled { border-color: var(--warn); color: var(--warn); }
+
+[hidden] { display: none !important; }
+
+.hint {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.project-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.project-card:hover,
+.project-card:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.project-card strong {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.project-card .url,
+.project-card .meta {
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.empty-cards {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.project-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.project-banner-fields {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.1fr) minmax(180px, 1.4fr) minmax(140px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.project-banner-fields .field {
+  margin-bottom: 0;
+}
+
+@media (max-width: 900px) {
+  .project-banner-fields { grid-template-columns: 1fr; }
+}
+
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 14px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.steps-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.steps-item.active {
+  border-color: var(--accent);
+  background: #eef6f1;
+  font-weight: 600;
+}
+
+.steps-empty {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.actions.wrap {
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
