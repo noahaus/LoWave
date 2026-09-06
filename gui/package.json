@@ -1,0 +1,14 @@
+{
+  "name": "qa-pipeline-gui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron GUI for the webapp QA pipeline",
+  "main": "main.js",
+  "scripts": {
+    "start": "ELECTRON_RUN_AS_NODE= npx electron .",
+    "smoke": "node smoke.js"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0"
+  }
+}

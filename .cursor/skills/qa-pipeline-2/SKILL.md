@@ -1,6 +1,6 @@
 ---
 name: qa-pipeline
-description: Turns numbered English steps into Playwright tests via qa-parse, qa-refine, and qa-generate. Use when generating E2E tests from steps.txt or examples/workflows, running the QA pipeline, or refining/grounding action plans against the demo app.
+description: Turns numbered English steps into Playwright tests via qa-parse, qa-refine, and qa-generate. Use when generating E2E tests from stepstxt or examples/workflows, running the QA pipeline, or refining/grounding action plans against the demo app.
 ---
 
 # QA Pipeline

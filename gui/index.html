@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QA Pipeline</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="hero">
+      <p class="brand">Kestrel QA Pipeline</p>
+      <h1>Steps to Playwright</h1>
+      <p class="lede">Pick a numbered steps file, run parse → refine → generate, and get a Playwright spec.</p>
+    </header>
+
+    <main class="layout">
+      <section class="panel controls">
+        <label class="field">
+          <span>Steps file</span>
+          <div class="row">
+            <input id="stepsPath" type="text" readonly placeholder="Choose a .txt workflow…" />
+            <button type="button" id="browseBtn" class="btn ghost">Browse</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Example workflows</span>
+          <select id="examples"></select>
+        </label>
+
+        <div class="grid2">
+          <label class="field">
+            <span>Base URL</span>
+            <input id="baseUrl" type="text" value="http://localhost:3000" />
+          </label>
+          <label class="field">
+            <span>Backend</span>
+            <select id="backend">
+              <option value="ollama" selected>ollama</option>
+              <option value="anthropic">anthropic</option>
+              <option value="openai">openai</option>
+              <option value="google">google</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="grid2">
+          <label class="field">
+            <span>Model</span>
+            <input id="model" type="text" value="qwen3-coder:30b" />
+          </label>
+          <label class="field">
+            <span>Spec name (optional)</span>
+            <input id="specName" type="text" placeholder="from steps filename" />
+          </label>
+        </div>
+
+        <div class="grid2">
+          <label class="field">
+            <span>Username</span>
+            <input id="username" type="text" value="demo@kestrel.app" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="password" type="password" value="test1234" />
+          </label>
+        </div>
+
+        <fieldset class="stages">
+          <legend>Stages</legend>
+          <label><input type="checkbox" id="doParse" checked /> Parse</label>
+          <label><input type="checkbox" id="doRefine" checked /> Refine</label>
+          <label><input type="checkbox" id="doGenerate" checked /> Generate</label>
+          <label><input type="checkbox" id="doTest" /> Run Playwright</label>
+        </fieldset>
+
+        <div class="actions">
+          <button type="button" id="runBtn" class="btn primary">Run pipeline</button>
+          <p id="status" class="status" aria-live="polite">Idle</p>
+        </div>
+      </section>
+
+      <section class="panel preview">
+        <div class="panel-head">
+          <h2>Steps preview</h2>
+          <span id="stagePills" class="pills"></span>
+        </div>
+        <pre id="stepsPreview" class="preview-box">Select a steps file to preview.</pre>
+        <h2>Log</h2>
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>
