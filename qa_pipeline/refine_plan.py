@@ -257,8 +257,19 @@ _NOISE_ROLES = {"none", "presentation", "generic", "main", "group"}
 _CONTROL_TAGS = {"a", "button", "input", "select", "textarea", "summary"}
 _CONTROL_ROLES = {
     "button", "link", "textbox", "combobox", "tab", "menuitem",
-    "checkbox", "radio", "searchbox", "option",
+    "checkbox", "radio", "searchbox", "option", "status", "alert",
 }
+_FLASH_ROLES = {"status", "alert", "alertdialog"}
+_SUBMITISH = re.compile(
+    r"\b(add event|save|submit|create|delete|sign in|log in|continue|apply)\b",
+    re.I,
+)
+_FLASH_ASSERT_RE = re.compile(
+    r"\b(toast|snackbar|notification|flash(?:\s+message)?|banner)\b"
+    r"|confirms? (?:the )?\w+ was (?:created|added|saved|updated|deleted|submitted)"
+    r"|was (?:created|added|saved|updated|deleted) successfully",
+    re.I,
+)
 # gpt-4o org TPM here is 30k; keep a single grounding call well under that.
 _LLM_DOM_CAP = 80
 _LLM_DOM_CAP_RETRY = 36
@@ -347,6 +358,10 @@ def select_dom_for_llm(
     if not usable:
         usable = list(dom)
 
+    pinned = [
+        el for el in usable
+        if (el.get("role") or "").lower() in _FLASH_ROLES
+    ]
     keyword_hits = []
     rest = []
     for el in usable:
@@ -359,7 +374,7 @@ def select_dom_for_llm(
     rest.sort(key=lambda el: _score_element(el, keywords), reverse=True)
     chosen: list[dict[str, Any]] = []
     seen: set[int] = set()
-    for el in keyword_hits + rest:
+    for el in pinned + keyword_hits + rest:
         idx = el.get("index")
         if idx in seen:
             continue
@@ -438,7 +453,7 @@ def log_snapshot_preview(elements: list[dict[str, Any]]) -> None:
 
 def grounding_matches_dom(step: RefinedStep, dom: list[dict[str, Any]]) -> bool:
     """True when the grounded locator corresponds to something in this snapshot."""
-    if step.action not in _ELEMENT_ACTIONS:
+    if step.action not in {"click", "type", "select", "hover", "drag"}:
         return True
     if step.element_index is not None:
         return any(el.get("index") == step.element_index for el in dom)
@@ -489,6 +504,42 @@ async def wait_for_stable_page(page: Page, *, timeout_ms: int = 15000) -> None:
     except Exception:
         pass
     await page.wait_for_timeout(150)
+
+
+async def wait_for_ui_settle(page: Page, *, watch_flash: bool = False) -> Optional[str]:
+    """After a click/submit, wait out save spinners and capture a toast/status.
+
+    Many apps delay the success toast until a modal overlay is removed. A 150ms
+    load wait is too short, and a later LLM round-trip is too late — the toast
+    is already gone. Capture the flash here, while it is on screen.
+    """
+    await wait_for_stable_page(page)
+    had_overlay = False
+    try:
+        overlay = page.locator("#overlay, .overlay")
+        if await overlay.count() > 0:
+            had_overlay = True
+            log("  Waiting for overlay/modal to close")
+            await overlay.first.wait_for(state="detached", timeout=6000)
+            log("  Overlay/modal dismissed", "OK")
+    except Exception as e:
+        log(f"  Overlay wait: {e}", "WARN")
+    if not (watch_flash or had_overlay):
+        return None
+    flash: Optional[str] = None
+    try:
+        loc = page.get_by_role("status").or_(page.get_by_role("alert"))
+        await loc.first.wait_for(state="visible", timeout=2500)
+        flash = " ".join((await loc.first.inner_text()).split())
+        if flash:
+            log(f"  Captured flash/status: {flash!r}", "OK")
+    except Exception:
+        pass
+    return flash
+
+
+def _is_flash_assert(fuzzy: FuzzyStep) -> bool:
+    return fuzzy.action == "assert" and bool(_FLASH_ASSERT_RE.search(fuzzy.target or ""))
 
 
 async def snapshot_interactive_dom(page: Page) -> list[dict[str, Any]]:
@@ -603,7 +654,7 @@ Return the grounded RefinedStep."""
 
 def build_refiner(backend: str, model: Optional[str], temperature: float = 0.0):
     log(f"Building grounding chain with backend={backend} model={model or 'default'}")
-    llm = build_llm(backend, model, temperature)
+    llm = build_llm(backend, model, temperature, max_tokens=2048)
     structured = llm.with_structured_output(RefinedStep)
     prompt = ChatPromptTemplate.from_messages([("system", _SYSTEM), ("human", _HUMAN)])
     log("Grounding chain ready")
@@ -1093,6 +1144,7 @@ async def refine(
     original_by_no = {s["step"]: s for s in plan["steps"]}
     history: list[str] = []
     ambiguities: list[str] = list(warnings)
+    last_flash: Optional[str] = None
 
     log(f"Launching browser (headless={headless})")
     async with async_playwright() as p:
@@ -1130,6 +1182,38 @@ async def refine(
                 history.append(f"step {step.step_number}: terminate (end of flow)")
                 continue
 
+            if _is_flash_assert(fuzzy) and last_flash:
+                log(f"  Toast/status assert using captured message {last_flash!r}", "OK")
+                step = RefinedStep(
+                    step_number=fuzzy.step_number,
+                    action="assert",
+                    element_index=None,
+                    locator_strategy="role",
+                    locator_value=last_flash,
+                    role_name="status",
+                    value=last_flash,
+                    expected_result=fuzzy.expected_result or last_flash,
+                    confidence=0.9,
+                    reclassified=False,
+                    notes=None,
+                    assert_values=[last_flash],
+                )
+                try:
+                    await execute_step(page, step, base_url)
+                except Exception as e:
+                    log(
+                        f"  Flash already dismissed ({e}) — accepting captured {last_flash!r}",
+                        "WARN",
+                    )
+                last_flash = None
+                step.notes = None
+                refined_steps.append(step)
+                history.append(
+                    f"step {step.step_number}: assert flash {step.locator_value!r}"
+                )
+                log(f"  Step {fuzzy.step_number} complete  (conf={step.confidence:.2f})", "OK")
+                continue
+
             attempt = 0
             while True:
                 attempt += 1
@@ -1159,7 +1243,7 @@ async def refine(
                 dom = await snapshot_interactive_dom(page)
                 step = await ground_step(chain, fuzzy, dom, history)
 
-                if not grounding_matches_dom(step, dom) and step.action in _ELEMENT_ACTIONS:
+                if not grounding_matches_dom(step, dom) and step.action in {"click", "type", "select", "hover", "drag"}:
                     log(
                         f"  Grounded {step.locator_strategy}:{step.locator_value!r} "
                         f"is not in this snapshot — not clicking a guessed locator",
@@ -1195,7 +1279,15 @@ async def refine(
                 try:
                     await execute_step(page, step, base_url)
                     log(f"  Waiting for page to settle...")
-                    await wait_for_stable_page(page)
+                    flash = await wait_for_ui_settle(
+                        page,
+                        watch_flash=bool(
+                            _SUBMITISH.search(f"{step.locator_value or ''} {step.value or ''}")
+                        ),
+                    )
+                    if flash:
+                        last_flash = flash
+                        history.append(f"flash message: {flash}")
 
                     # Execution succeeded — stamp the step as definitively grounded
                     step.notes = (step.notes or "").replace("⚠️", "").strip() or None

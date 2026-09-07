@@ -243,13 +243,19 @@ def main():
     system_prompt = build_system_prompt(base_url, username, password)
 
     print(f"{BOLD}━━━ Analysing with {backend} ━━━{RESET}")
-    llm = build_llm(backend, args.model, args.temperature)
+    llm = build_llm(backend, args.model, args.temperature, max_tokens=8192)
     raw = llm.invoke(build_messages(system_prompt, steps_text)).content
 
     try:
         plan = ActionPlan.model_validate_json(extract_json(raw))
     except (ValueError, ValidationError) as e:
         print(f"  {YELLOW}❌ model output did not match the schema:{RESET}\n  {e}")
+        err = str(e).lower()
+        if "eof" in err or "json_invalid" in err or "unterminated" in err:
+            print(
+                f"  {YELLOW}Hint: output looks truncated (the steps array never closed). "
+                f"This is usually a max_tokens cutoff on a long workflow — retry parse.{RESET}"
+            )
         print(f"\n  {DIM}Raw output (first 800 chars):{RESET}\n{str(raw)[:800]}")
         sys.exit(1)
 
