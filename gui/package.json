@@ -4,6 +4,7 @@
   "private": true,
   "description": "Electron GUI for the webapp QA pipeline",
   "main": "main.js",
+  "icon": "icon.png",
   "scripts": {
     "start": "ELECTRON_RUN_AS_NODE= npx electron .",
     "smoke": "node smoke.js"

@@ -32,7 +32,24 @@ html, body {
 }
 
 .hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
   margin-bottom: 22px;
+}
+
+.app-icon {
+  width: 56px;
+  height: 56px;
+  flex: none;
+  border-radius: 12px;
+  object-fit: contain;
+  background: #111;
+  box-shadow: 0 1px 2px rgba(20, 30, 45, 0.08);
+}
+
+.hero-copy {
+  min-width: 0;
 }
 
 .brand {

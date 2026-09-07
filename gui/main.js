@@ -14,6 +14,7 @@ if (!app || !ipcMain) {
 }
 
 const store = createProjectStore(REPO_ROOT);
+const ICON_PATH = path.join(__dirname, "icon.png");
 
 let mainWindow = null;
 let running = false;
@@ -27,6 +28,7 @@ function createWindow() {
     minHeight: 620,
     title: "QA Pipeline",
     backgroundColor: "#e8ebe6",
+    icon: ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -108,6 +110,9 @@ function registerIpc() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.setIcon(ICON_PATH);
+  }
   registerIpc();
   createWindow();
   app.on("activate", () => {
