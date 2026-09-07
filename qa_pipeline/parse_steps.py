@@ -91,7 +91,7 @@ Output ONE JSON object and nothing else — no prose, no markdown fences. Schema
     {{
       "step": <int, 1-based, in order>,
       "id": "<short_snake_case_id>",
-      "action": "navigate|type|click|select|scroll|hover|drag|wait|assert",
+      "action": "navigate|type|click|select|scroll|hover|drag|wait|assert|press",
       "description": "<what the user should do / verify>",
       "target": {{
         "css_selector": "<best-guess selector if inferable>",
@@ -120,8 +120,15 @@ Rules:
 - Set workflow.base_url to "{base_url}".
 {credentials_rule}
 - Prefer locating elements by visible text / labels named in the instructions.
-- Record validation moments (success toast, confirmation, "assert that…") as
-  "assert" steps.
+- Do not guess a tag-specific CSS selector for search boxes or text fields
+  (they may be <input>, <textarea>, or role=combobox). Prefer aria_label /
+  accessible name. Treat css_selector as a last resort, and if you include
+  name='q' use a tag-agnostic selector such as [name='q'].
+- Record validation moments (success toast, confirmation, "assert that…",
+  "you should see…") as "assert" steps.
+- "Press Enter", "hit return", "press Tab" and similar keystrokes are action
+  "press" with input_value set to the key name (Enter, Tab, Escape). Do not
+  encode Enter as type with a newline.
 - Do NOT invent credentials, URLs, or field values that are not in the steps or
   the rules above.
 - Note significant ambiguities in metadata.known_ambiguities.

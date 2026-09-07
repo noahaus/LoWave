@@ -116,6 +116,7 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
  * @param {boolean} [opts.refine]
  * @param {boolean} [opts.generate]
  * @param {boolean} [opts.runTests]
+ * @param {boolean} [opts.headed]
  * @param {string} [opts.specName]
  * @param {(evt: object) => void} [opts.onEvent]
  * @param {AbortSignal} [opts.signal]
@@ -132,6 +133,7 @@ async function runPipeline(opts) {
     refine = true,
     generate = true,
     runTests = false,
+    headed = true,
     specName,
     onEvent = () => {},
     signal,
@@ -194,6 +196,7 @@ async function runPipeline(opts) {
       refinedPlan,
       "--url",
       baseUrl,
+      ...(headed ? ["--headed"] : []),
       ...llmArgs,
     ];
     await runCommand(resolveCli("qa-refine"), args, { onLine: log, signal });

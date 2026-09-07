@@ -36,7 +36,7 @@ def build_llm(backend: str, model: Optional[str] = None, temperature: float = 0.
         )
     if backend == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=resolved, temperature=temperature)
+        return ChatOpenAI(model=resolved, temperature=temperature, max_tokens=2048)
     if backend == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(model=resolved, temperature=temperature)

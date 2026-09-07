@@ -12,11 +12,13 @@ What it does, step by step
 1. Loads the action plan and adapts it internally (the parser's css_selectors are
    treated as UNVERIFIED hints, because the steps LLM cannot see the DOM; the
    human-readable `description` is the real signal).
-2. Walks the flow in a browser. Before each step it snapshots only the visible,
-   interactive elements (raw HTML would blow the context window).
-3. An LLM grounds each fuzzy step against that snapshot: picks the real element,
-   emits a DURABLE Playwright locator, extracts the value, and may RECLASSIFY the
-   action (e.g. a native <select> mislabelled as a click).
+2. Walks the flow in a browser. Before each step it snapshots visible controls:
+   native interactive elements plus custom clickable widgets (chips/tabs/spans
+   with a pointer cursor). Raw HTML would blow the context window.
+3. An LLM grounds each fuzzy step against a *compacted* snapshot (ranked, capped)
+   so the prompt stays under typical API token-per-minute limits. It picks the
+   real element, emits a DURABLE Playwright locator, extracts the value, and may
+   RECLASSIFY the action (e.g. a native <select> mislabelled as a click).
 4. Executes the step and asserts the expected result. Low confidence or a failed
    action triggers a re-snapshot + re-ground (self-heal).
 5. Writes the refined plan back out, with a per-step `refinement` block
@@ -43,7 +45,7 @@ import re
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
-from playwright.async_api import async_playwright, expect, Page, Locator
+from playwright.async_api import async_playwright, expect, Page, Locator, Error as PlaywrightError
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -91,6 +93,7 @@ class RefinedStep(BaseModel):
     locator_strategy: LocatorStrategy = Field(description="Durable locator kind; prefer testid>role>label>placeholder>text>css.")
     locator_value: str = Field(description="Accessible name / label / test id / text / css selector.")
     role_name: Optional[str] = Field(default=None, description="ARIA role when strategy=='role'.")
+    host_tag: Optional[str] = Field(default=None, description="Matched element's tag; used to scope text locators.")
     value: Optional[str] = None
     expected_result: str
     confidence: float = Field(ge=0.0, le=1.0)
@@ -105,15 +108,85 @@ class RefinedStep(BaseModel):
 
 _EXTRACT_JS = r"""
 () => {
-  const sel = 'a,button,input,select,textarea,summary,[role],[onclick],[tabindex]:not([tabindex="-1"]),h1,h2,h3,h4,h5,h6,[data-testid],[data-test-id],[class*="badge"]';
+  const SEMANTIC = 'a,button,input,select,textarea,summary,[role],[onclick],[tabindex]:not([tabindex="-1"]),h1,h2,h3,h4,h5,h6,[data-testid],[data-test-id],[class*="badge"],[jsaction],[contenteditable="true"]';
+  const POINTER_TAGS = 'div,span,li,td,th,p,label,section,article,header,nav,em,strong,i,b';
   const isVisible = (el) => {
     const r = el.getBoundingClientRect();
     const s = window.getComputedStyle(el);
     return r.width > 1 && r.height > 1 &&
            s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
   };
-  const els = Array.from(document.querySelectorAll(sel)).filter(isVisible);
-  return els.map((el, i) => {
+  const ownName = (el) => {
+    const text = (el.innerText || el.value || '').trim();
+    return text ||
+           (el.getAttribute('aria-label') || '').trim() ||
+           (el.getAttribute('placeholder') || '').trim() ||
+           (el.getAttribute('title') || '').trim() ||
+           '';
+  };
+  const innermostSameText = (el) => {
+    const text = (el.innerText || '').trim();
+    let cur = el;
+    while (true) {
+      const kids = Array.from(cur.children).filter(isVisible);
+      if (kids.length === 1 && (kids[0].innerText || '').trim() === text && text) {
+        cur = kids[0];
+        continue;
+      }
+      break;
+    }
+    return cur;
+  };
+  const seen = new Set();
+  const els = [];
+  const add = (el) => {
+    if (!el || seen.has(el) || !isVisible(el)) return;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'body' || tag === 'html') return;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (role === 'none' || role === 'presentation') return;
+    seen.add(el);
+    els.push(el);
+  };
+  document.querySelectorAll(SEMANTIC).forEach(add);
+
+  // Custom chips/tabs/menus: clickable in the UI (pointer cursor) but not a
+  // native control and often missing role/onclick/tabindex.
+  for (const el of document.querySelectorAll(POINTER_TAGS)) {
+    if (seen.has(el) || !isVisible(el)) continue;
+    if (window.getComputedStyle(el).cursor !== 'pointer') continue;
+    const name = ownName(el);
+    if (!name || name.length > 80) continue;
+    let covered = false;
+    for (const existing of els) {
+      if (existing !== el && el.contains(existing)) { covered = true; break; }
+    }
+    if (covered) continue;
+    add(innermostSameText(el));
+  }
+
+  // Page titles used in asserts (h1–h6, <b>/<strong>) are often not clickable,
+  // so the pointer pass misses them. Nav already captured the same word as a link.
+  for (const el of document.querySelectorAll('h1,h2,h3,h4,h5,h6,b,strong,[role="heading"]')) {
+    if (seen.has(el) || !isVisible(el)) continue;
+    const name = ownName(el);
+    if (!name || name.length > 80) continue;
+    let inside = false;
+    for (const existing of els) {
+      if (existing !== el && existing.contains(el)) { inside = true; break; }
+    }
+    if (inside) continue;
+    add(el);
+  }
+
+  const controls = els.filter((el) => {
+    const tag = el.tagName.toLowerCase();
+    if (['a','button','input','select','textarea','summary','h1','h2','h3','h4','h5','h6','b','strong'].includes(tag)) return true;
+    const lines = ((el.innerText || '').trim().split('\n').length);
+    return lines <= 4;
+  });
+
+  return controls.map((el, i) => {
     el.setAttribute('data-ai-index', String(i));   // ephemeral handle for THIS snapshot
     const r = el.getBoundingClientRect();
     const label = el.getAttribute('aria-label') ||
@@ -129,15 +202,18 @@ _EXTRACT_JS = r"""
       tag === 'button'   ? 'button'    :
       tag === 'a'        ? 'link'      :
       tag === 'summary'  ? 'button'    :
+      (tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' || tag === 'h5' || tag === 'h6') ? 'heading' :
       null
     );
+    const rawText = (el.innerText || el.value || '').trim();
+    const firstLine = rawText.split(/\n/).map(s => s.trim()).filter(Boolean)[0] || rawText;
     return {
       index: i,
       tag: tag,
       role: implicitRole,
       explicit_role: explicitRole,
       type: el.getAttribute('type'),
-      text: (el.innerText || el.value || '').trim().slice(0, 80),
+      text: firstLine.slice(0, 80),
       label: label,
       placeholder: el.getAttribute('placeholder'),
       name: el.getAttribute('name'),
@@ -151,11 +227,291 @@ _EXTRACT_JS = r"""
 """
 
 
+_NAV_CONTEXT_RE = re.compile(
+    r"execution context was destroyed|most likely because of a navigation",
+    re.I,
+)
+
+
+_BLOCK_URL_RE = re.compile(
+    r"/sorry/|recaptcha|captcha|challenge|checkpoint|cgi/denied",
+    re.I,
+)
+_BLOCK_TEXT_RE = re.compile(
+    r"unusual traffic|are you (a |really )?a robot|why did this happen|"
+    r"i['’]m not a robot|enable javascript|access denied|"
+    r"pardon our interruption|checking your browser|verify you are human",
+    re.I,
+)
+_ELEMENT_ACTIONS = {"click", "type", "select", "hover", "assert", "drag"}
+
+
+def _element_search_blob(el: dict[str, Any]) -> str:
+    return " ".join(
+        str(el.get(k) or "")
+        for k in ("text", "label", "placeholder", "name", "testid", "id")
+    )
+
+
+_NOISE_ROLES = {"none", "presentation", "generic", "main", "group"}
+_CONTROL_TAGS = {"a", "button", "input", "select", "textarea", "summary"}
+_CONTROL_ROLES = {
+    "button", "link", "textbox", "combobox", "tab", "menuitem",
+    "checkbox", "radio", "searchbox", "option",
+}
+# gpt-4o org TPM here is 30k; keep a single grounding call well under that.
+_LLM_DOM_CAP = 80
+_LLM_DOM_CAP_RETRY = 36
+_STEP_WORD_RE = re.compile(r"[a-z0-9]{3,}")
+
+
+def _is_noise_element(el: dict[str, Any]) -> bool:
+    tag = (el.get("tag") or "").lower()
+    if tag in {"body", "html"}:
+        return True
+    role = (el.get("role") or "").lower()
+    if role in {"none", "presentation"}:
+        return True
+    text = el.get("text") or ""
+    if text.count("\n") >= 3 and tag not in _CONTROL_TAGS:
+        return True
+    blob = _element_search_blob(el).strip()
+    if not blob and tag not in _CONTROL_TAGS and not el.get("testid"):
+        return True
+    return False
+
+
+def _step_keywords(fuzzy: FuzzyStep) -> list[str]:
+    blob = f"{fuzzy.target} {fuzzy.value or ''} {fuzzy.action}"
+    words = _STEP_WORD_RE.findall(blob.lower())
+    stop = {
+        "the", "and", "for", "with", "from", "into", "that", "this", "click",
+        "type", "press", "select", "assert", "navigate", "should", "page",
+        "button", "field", "input", "tab", "unverified", "parser", "guessed",
+        "selector",
+    }
+    return [w for w in words if w not in stop]
+
+
+def _score_element(el: dict[str, Any], keywords: list[str]) -> float:
+    blob = _element_search_blob(el).lower()
+    score = 0.0
+    if blob:
+        score += 2
+    tag = (el.get("tag") or "").lower()
+    role = (el.get("role") or "").lower()
+    if tag in _CONTROL_TAGS:
+        score += 5
+    if role in _CONTROL_ROLES:
+        score += 4
+    if el.get("testid"):
+        score += 8
+    if role in _NOISE_ROLES:
+        score -= 6
+    for kw in keywords:
+        if kw in blob:
+            score += 14
+    box = el.get("box") or {}
+    y = float(box.get("y") or 0)
+    x = float(box.get("x") or 0)
+    if 0 <= y <= 900 and 0 <= x <= 1400:
+        score += 1
+        score += max(0.0, (700 - y) / 400)
+    return score
+
+
+def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {"index": el.get("index"), "tag": el.get("tag")}
+    role = el.get("role")
+    if role and role not in {"none", "presentation"}:
+        out["role"] = role
+    for key in ("type", "text", "label", "placeholder", "name", "testid", "id"):
+        val = el.get(key)
+        if val:
+            out[key] = val[:80] if isinstance(val, str) else val
+    box = el.get("box") or {}
+    if box:
+        out["xy"] = [box.get("x"), box.get("y")]
+    return {k: v for k, v in out.items() if v not in (None, "", [])}
+
+
+def select_dom_for_llm(
+    dom: list[dict[str, Any]],
+    fuzzy: FuzzyStep,
+    *,
+    cap: int = _LLM_DOM_CAP,
+) -> list[dict[str, Any]]:
+    """Rank and compact the live snapshot so one LLM call stays under TPM limits."""
+    keywords = _step_keywords(fuzzy)
+    usable = [el for el in dom if not _is_noise_element(el)]
+    if not usable:
+        usable = list(dom)
+
+    keyword_hits = []
+    rest = []
+    for el in usable:
+        blob = _element_search_blob(el).lower()
+        if keywords and any(kw in blob for kw in keywords):
+            keyword_hits.append(el)
+        else:
+            rest.append(el)
+
+    rest.sort(key=lambda el: _score_element(el, keywords), reverse=True)
+    chosen: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for el in keyword_hits + rest:
+        idx = el.get("index")
+        if idx in seen:
+            continue
+        seen.add(idx)
+        chosen.append(el)
+        if len(chosen) >= cap:
+            break
+    chosen.sort(key=lambda el: int(el.get("index") or 0))
+    return [compact_element_for_llm(el) for el in chosen]
+
+
+def _is_too_large_request(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "request too large" in msg
+        or "rate_limit_exceeded" in msg
+        or "tokens per min" in msg
+        or "error code: 429" in msg
+        or "429" in msg and "token" in msg
+    )
+
+
+async def describe_block_page(page: Page) -> Optional[str]:
+    """Return a reason if the tab is a captcha/interstitial instead of the app."""
+    url = page.url or ""
+    if _BLOCK_URL_RE.search(url):
+        return f"block URL {url}"
+    try:
+        text = await page.inner_text("body", timeout=2000)
+    except Exception:
+        return None
+    if text and _BLOCK_TEXT_RE.search(text):
+        snippet = " ".join(text.split())[:120]
+        return f"bot-check copy on {url}: {snippet!r}"
+    return None
+
+
+async def wait_for_app_page(page: Page, *, headless: bool) -> None:
+    """Fail fast (headless) or wait for the user (headed) when a bot-check is showing."""
+    reason = await describe_block_page(page)
+    if not reason:
+        return
+    log(f"  Bot-check / interstitial detected: {reason}", "WARN")
+    if headless:
+        raise RuntimeError(
+            "The site served a bot-check/captcha page instead of the app, so the "
+            "target control is not in the DOM. Re-run refine headed (`--headed` or "
+            "the GUI 'Show browser' option) and complete the check, then continue. "
+            f"URL: {page.url}"
+        )
+    budget_s = 120
+    log(f"  Complete the check in the visible browser. Waiting up to {budget_s}s…", "WARN")
+    for _ in range(budget_s // 2):
+        await page.wait_for_timeout(2000)
+        reason = await describe_block_page(page)
+        if not reason:
+            log("  Interstitial cleared — continuing", "OK")
+            await wait_for_stable_page(page)
+            return
+    raise RuntimeError(
+        f"Still on a bot-check/captcha page after {budget_s}s. URL: {page.url}"
+    )
+
+
+def log_snapshot_preview(elements: list[dict[str, Any]]) -> None:
+    bits: list[str] = []
+    for el in elements[:12]:
+        name = " ".join(str(el.get("text") or el.get("label") or el.get("placeholder") or "").split())[:40]
+        bits.append(f"{el.get('index')}:{el.get('tag')}/{el.get('role') or '-'} {name!r}")
+    if bits:
+        log("  Snapshot: " + " | ".join(bits))
+    extra = len(elements) - 12
+    if extra > 0:
+        log(f"  … {extra} more")
+
+
+def grounding_matches_dom(step: RefinedStep, dom: list[dict[str, Any]]) -> bool:
+    """True when the grounded locator corresponds to something in this snapshot."""
+    if step.action not in _ELEMENT_ACTIONS:
+        return True
+    if step.element_index is not None:
+        return any(el.get("index") == step.element_index for el in dom)
+    needle = (step.locator_value or "").strip()
+    if not needle or needle.lower() == "n/a":
+        return False
+    low = needle.lower()
+    for el in dom:
+        if low in _element_search_blob(el).lower():
+            return True
+    return False
+
+
+async def launch_browser_page(p, *, headless: bool):
+    """Launch Chromium in a realistic context so sites are less likely to serve a bot wall."""
+    args = ["--disable-blink-features=AutomationControlled"]
+    browser = None
+    try:
+        browser = await p.chromium.launch(channel="chrome", headless=headless, args=args)
+        log(f"Launched system Chrome (headless={headless})")
+    except Exception as e:
+        log(f"  System Chrome unavailable ({e}) — using Playwright Chromium", "WARN")
+        browser = await p.chromium.launch(headless=headless, args=args)
+        log(f"Launched Playwright Chromium (headless={headless})")
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 800},
+        locale="en-US",
+    )
+    await context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+    )
+    page = await context.new_page()
+    return browser, context, page
+
+
+async def wait_for_stable_page(page: Page, *, timeout_ms: int = 15000) -> None:
+    """Wait until the current document can run JS.
+
+    Do not require networkidle — ads and analytics prevent it on many sites,
+    and a navigation in flight will destroy the next page.evaluate().
+    """
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    except Exception as e:
+        log(f"  Load wait (domcontentloaded): {e}", "WARN")
+    try:
+        await page.wait_for_load_state("load", timeout=min(timeout_ms, 10000))
+    except Exception:
+        pass
+    await page.wait_for_timeout(150)
+
+
 async def snapshot_interactive_dom(page: Page) -> list[dict[str, Any]]:
-    log(f"Snapshotting interactive DOM on: {page.url}")
-    elements = await page.evaluate(_EXTRACT_JS)
-    log(f"DOM snapshot complete — {len(elements)} interactive element(s) found")
-    return elements
+    last_err: Optional[Exception] = None
+    for attempt in range(1, 4):
+        await wait_for_stable_page(page)
+        try:
+            log(f"Snapshotting interactive DOM on: {page.url}")
+            elements = await page.evaluate(_EXTRACT_JS)
+            if len(elements) < 8:
+                log(f"  Sparse snapshot ({len(elements)}) — waiting for more UI", "WARN")
+                await page.wait_for_timeout(2000)
+                elements = await page.evaluate(_EXTRACT_JS)
+            log(f"DOM snapshot complete — {len(elements)} interactive element(s) found")
+            log_snapshot_preview(elements)
+            return elements
+        except Exception as e:
+            last_err = e
+            if attempt < 3 and _NAV_CONTEXT_RE.search(str(e)):
+                log(f"  Snapshot interrupted by navigation — retrying ({attempt}/3)", "RETRY")
+                continue
+            raise
+    raise last_err  # pragma: no cover
 
 
 # ===========================================================================
@@ -163,16 +519,21 @@ async def snapshot_interactive_dom(page: Page) -> list[dict[str, Any]]:
 # ===========================================================================
 
 _SYSTEM = """You are a QA grounding engine. You receive ONE fuzzy step from a \
-steps-derived test plan plus a JSON list of the interactive elements currently \
-visible in the app's DOM (each with an `index` and attributes: text, role, label, \
-placeholder, testid, tag, background colour, bounding box).
+steps-derived test plan plus a JSON list of currently visible elements: native \
+controls AND custom clickable widgets (chips, tabs, menu items implemented as \
+div/span with a pointer cursor). Each entry has an `index` and attributes: \
+text, role, label, placeholder, testid, tag, background colour, bounding box.
 
 Resolve the fuzzy step to a concrete, reproducible RefinedStep.
 
 Rules:
 - Pick the single best-matching element; return its `index` as `element_index`.
-- Emit the MOST DURABLE locator, preferring: testid > role(+accessible name) >
-  label > placeholder > text > css.
+- Emit the MOST DURABLE locator, preferring: testid > role(+exact accessible name) >
+  exact label > placeholder > text > css.
+- Accessible names are matched EXACTLY. Never rely on substring label matching:
+  getByLabel("Search") also matches "Search by voice", "Search for Images", and
+  "Google Search". Prefer strategy="role" with the element's real role (e.g.
+  combobox) plus the exact name "Search".
 - Match on semantics first (text/label/role/name); use position (bounding box) and
   colour only to break ties, e.g. "blue button bottom-right".
 - The step may carry a parser-guessed css selector marked UNVERIFIED. Treat it as a
@@ -183,18 +544,32 @@ Rules:
   in `value`; if a 'type' target is actually a button/link, fix it. Set
   reclassified=true whenever you change the action type.
 - `role_name` MUST be the exact ARIA role string of the matched element (e.g.
-  "region", "button", "textbox", "heading", "link", "dialog"). NEVER leave it null
+  "region", "button", "textbox", "combobox", "heading", "link", "dialog"). NEVER leave it null
   when strategy=="role" and NEVER default it to "button" — use the actual role from
-  the DOM snapshot (the `role` field on the element, or infer from tag: div[role]=
-  "region"/"section", input="textbox", a="link", button="button", h1-h6="heading").
+  the DOM snapshot (the `role` / `explicit_role` field). A <textarea role="combobox">
+  is a combobox, NOT a textbox, even though textarea's implicit role is textbox.
+- When strategy=="role", `locator_value` is the accessible name (label), NEVER the
+  role string. Wrong: locator_value="combobox". Right: role_name="combobox",
+  locator_value="Search".
+- For "press Enter/Tab/Escape" (submit a field): set action to "press" and value to
+  the key (Enter, Tab, Escape). Do not use type with a newline, and do not treat it
+  as a mouse click.
 - For a native <select> element (tag="select", role="listbox"): ALWAYS use
   strategy="label" with the element's aria-label or associated label text as
   locator_value. Never use strategy="role" for selects — getByLabel is more durable
   and avoids strict-mode ambiguity. The action should be "select", not "click".
+- If the matched element has no ARIA role (tag is div/span/li/td and `role` is null),
+  use strategy="text" with ONE visible line from `text` (or aria-label). Do NOT
+  invent role="tab" / role="button" / role="link". Do NOT put a newline, `<br>`,
+  or a second line (report id, subtitle) in locator_value — getByText exact match
+  will not find innerText that spans multiple nodes.
 - For navigate/wait/scroll with no element, set element_index=null and
   locator_value="n/a".
-- If no element is a confident match, return your best guess with confidence < 0.5
-  and explain the ambiguity in `notes` (the ⚠️ flag).
+- For assert steps, ALWAYS set `element_index` to a real snapshot row. Assert is not
+  navigate — null index is wrong.
+- If the same visible string appears twice (sidebar "Dashboard" link AND a page
+  title "Dashboard"), pick the page title: prefer tag h1–h6, then b/strong, and
+  avoid role=link. A heading/title assert must not target navigation.
 - expected_result: restate what should visibly change, grounded in the real UI.
 
 ASSERT STEPS — special rules:
@@ -216,7 +591,7 @@ _HUMAN = """FUZZY STEP:
 RECENT CONTEXT (already executed, newest last):
 {history}
 
-CURRENT DOM (visible interactive elements only):
+CURRENT DOM (visible controls and clickable chips/tabs):
 {dom}
 
 REMINDER — if this is an assert step:
@@ -237,12 +612,33 @@ def build_refiner(backend: str, model: Optional[str], temperature: float = 0.0):
 
 async def ground_step(chain, fuzzy: FuzzyStep, dom: list[dict], history: list[str]) -> RefinedStep:
     log(f"  Grounding step {fuzzy.step_number}: [{fuzzy.action}] {fuzzy.target[:80]}...")
-    log(f"  Sending {len(dom)} DOM elements + {min(len(history), 6)} history entries to LLM")
-    step = await chain.ainvoke({
-        "fuzzy_step": fuzzy.model_dump_json(indent=2),
-        "history": "\n".join(history[-6:]) or "(none)",
-        "dom": json.dumps(dom, ensure_ascii=False),
-    })
+    payload = select_dom_for_llm(dom, fuzzy)
+    dumped = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    log(
+        f"  Sending {len(payload)}/{len(dom)} DOM elements "
+        f"({len(dumped)} chars) + {min(len(history), 6)} history entries to LLM"
+    )
+
+    async def _invoke(dom_payload: list[dict[str, Any]]) -> RefinedStep:
+        return await chain.ainvoke({
+            "fuzzy_step": fuzzy.model_dump_json(),
+            "history": "\n".join(history[-6:]) or "(none)",
+            "dom": json.dumps(dom_payload, ensure_ascii=False, separators=(",", ":")),
+        })
+
+    try:
+        step = await _invoke(payload)
+    except Exception as e:
+        if not _is_too_large_request(e):
+            raise
+        smaller = select_dom_for_llm(dom, fuzzy, cap=_LLM_DOM_CAP_RETRY)
+        log(
+            f"  Request too large ({e.__class__.__name__}) — retrying with "
+            f"{len(smaller)} elements",
+            "RETRY",
+        )
+        await asyncio.sleep(1.5)
+        step = await _invoke(smaller)
     step.step_number = fuzzy.step_number           # keep numbering authoritative
     step.reclassified = step.reclassified or (step.action != fuzzy.action)
 
@@ -250,6 +646,15 @@ async def ground_step(chain, fuzzy: FuzzyStep, dom: list[dict], history: list[st
     if step.value is None and fuzzy.value is not None and step.action in ("type", "press", "select", "navigate"):
         log(f"  LLM returned value=None for [{step.action}] — restoring fuzzy value: {fuzzy.value!r}", "WARN")
         step.value = fuzzy.value
+    if step.action == "press":
+        step.value = _normalize_key(step.value or fuzzy.value)
+
+    _sanitize_text_locator(step, fuzzy)
+    _resolve_assert_target(step, fuzzy, dom)
+    if step.element_index is not None and not step.host_tag:
+        matched = next((el for el in dom if el.get("index") == step.element_index), None)
+        if matched:
+            step.host_tag = matched.get("tag")
 
     log(f"  LLM grounded to: {step.locator_strategy}:{step.locator_value!r}  confidence={step.confidence:.2f}")
 
@@ -266,6 +671,18 @@ async def ground_step(chain, fuzzy: FuzzyStep, dom: list[dict], history: list[st
             log(f"    testid     : {matched.get('testid')!r}")
             log(f"    id         : {matched.get('id')!r}")
             log(f"    box        : {matched.get('box')}")
+            if step.locator_strategy == "role":
+                if not step.role_name:
+                    step.role_name = matched.get("role") or matched.get("explicit_role")
+                if _is_role_token(step.locator_value, step.role_name):
+                    name = (matched.get("label") or matched.get("placeholder") or "").strip()
+                    if name:
+                        log(
+                            f"  Role locator_value {step.locator_value!r} is a role token "
+                            f"— using accessible name {name!r}",
+                            "WARN",
+                        )
+                        step.locator_value = name
         else:
             log(f"  Matched element index {step.element_index} not found in snapshot", "WARN")
     else:
@@ -280,29 +697,180 @@ async def ground_step(chain, fuzzy: FuzzyStep, dom: list[dict], history: list[st
 # 4. Locator building — a live Locator, and a durable string for the plan
 # ===========================================================================
 
-def to_locator(page: Page, step: RefinedStep) -> Locator:
-    s, v = step.locator_strategy, step.locator_value
-    if s == "role" and step.role_name:
-        return page.get_by_role(step.role_name, name=v) if v else page.get_by_role(step.role_name)
-    if s == "label":
-        return page.get_by_label(v)
-    if s == "placeholder":
-        return page.get_by_placeholder(v)
-    if s == "text":
-        return page.get_by_text(v)
-    if s == "testid":
-        return page.get_by_test_id(v)
-    if step.element_index is not None:                       # css / fallback
-        return page.locator(f'[data-ai-index="{step.element_index}"]')
-    return page.locator(v)
-
-
 _KNOWN_ARIA_ROLES = {
     "region", "section", "article", "main", "navigation", "heading",
     "textbox", "checkbox", "combobox", "listbox", "option", "link",
     "img", "table", "row", "cell", "dialog", "alert", "banner",
     "button", "radio", "menuitem", "tab", "tabpanel", "tree", "treeitem",
 }
+
+
+def _is_role_token(value: Optional[str], role_name: Optional[str] = None) -> bool:
+    """True when locator_value is an ARIA role (e.g. 'combobox'), not an accessible name."""
+    if not value:
+        return True
+    v = value.strip().lower()
+    if v in _KNOWN_ARIA_ROLES:
+        return True
+    return bool(role_name) and v == role_name.strip().lower()
+
+
+def _role_accessible_name(step: RefinedStep) -> Optional[str]:
+    """Name passed to getByRole(..., name=). None if locator_value is just the role."""
+    v = (step.locator_value or "").strip()
+    if not v or _is_role_token(v, step.role_name):
+        return None
+    return v
+
+
+def _primary_visible_text(value: Optional[str], fuzzy: Optional[FuzzyStep] = None) -> str:
+    """Playwright getByText cannot match innerText that a <br> joined with a newline.
+
+    Keep a single visual line. Prefer the line that overlaps the step wording.
+    """
+    if not value:
+        return ""
+    lines = [ln.strip() for ln in re.split(r"[\r\n]+", value) if ln.strip()]
+    if not lines:
+        return value.strip()
+    if len(lines) == 1:
+        return lines[0]
+    keywords = _step_keywords(fuzzy) if fuzzy else []
+    if keywords:
+        def overlap(ln: str) -> int:
+            low = ln.lower()
+            return sum(1 for kw in keywords if kw in low)
+        ranked = sorted(lines, key=overlap, reverse=True)
+        if overlap(ranked[0]) > 0:
+            return ranked[0]
+    return lines[0]
+
+
+_TEXT_SCOPE_TAGS = {"b", "strong", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def _text_locator_expr(value: str, host_tag: Optional[str] = None) -> str:
+    q = json.dumps
+    v = _primary_visible_text(value)
+    tag = (host_tag or "").lower()
+    if tag in _TEXT_SCOPE_TAGS:
+        return f"locator({q(tag)}).get_by_text({q(v)}, exact=True)"
+    return f"get_by_text({q(v)}, exact=True)"
+
+
+def _text_locator(page: Page, value: str, host_tag: Optional[str] = None) -> Locator:
+    v = _primary_visible_text(value)
+    tag = (host_tag or "").lower()
+    if tag in _TEXT_SCOPE_TAGS:
+        return page.locator(tag).get_by_text(v, exact=True)
+    return page.get_by_text(v, exact=True)
+
+
+def _resolve_assert_target(step: RefinedStep, fuzzy: FuzzyStep, dom: list[dict[str, Any]]) -> None:
+    """When 'Dashboard' is both a nav link and a page title, prefer the title."""
+    if step.action != "assert":
+        return
+    needle = _primary_visible_text(step.locator_value if step.locator_strategy == "text" else "", fuzzy)
+    if not needle and step.assert_values:
+        needle = _primary_visible_text(step.assert_values[0], fuzzy)
+    if not needle and step.value:
+        needle = _primary_visible_text(step.value, fuzzy)
+    if not needle:
+        return
+    low = needle.lower()
+    matches = [
+        el for el in dom
+        if (el.get("text") or "").strip().lower() == low
+        or low == (el.get("label") or "").strip().lower()
+    ]
+    if not matches:
+        matches = [el for el in dom if low in _element_search_blob(el).lower()]
+    if not matches:
+        return
+
+    wants_heading = bool(re.search(r"\b(heading|title|h1)\b", fuzzy.target or "", re.I))
+
+    def rank(el: dict[str, Any]) -> int:
+        tag = (el.get("tag") or "").lower()
+        role = (el.get("role") or "").lower()
+        score = 0
+        if tag in _TEXT_SCOPE_TAGS or role == "heading":
+            score += 10
+        if wants_heading and (tag in _TEXT_SCOPE_TAGS or role == "heading"):
+            score += 8
+        if role == "link":
+            score -= 6
+        return score
+
+    best = max(matches, key=rank)
+    step.element_index = best.get("index")
+    step.host_tag = best.get("tag")
+    if step.locator_strategy in ("text", "css") or not step.locator_value or step.locator_value == "n/a":
+        step.locator_strategy = "text"
+        step.locator_value = needle
+    if step.confidence < 0.6 and rank(best) >= 10:
+        step.confidence = 0.75
+        log(
+            f"  Assert target disambiguated to <{best.get('tag')}> "
+            f"index {best.get('index')} {needle!r}",
+            "OK",
+        )
+
+
+def _sanitize_text_locator(step: RefinedStep, fuzzy: Optional[FuzzyStep] = None) -> None:
+    if step.locator_strategy not in ("text", "label", "placeholder", "role"):
+        return
+    cleaned = _primary_visible_text(step.locator_value, fuzzy)
+    if cleaned and cleaned != step.locator_value:
+        log(
+            f"  Collapsing multi-line locator {step.locator_value!r} → {cleaned!r}",
+            "WARN",
+        )
+        step.locator_value = cleaned
+
+
+def _normalize_key(value: Optional[str]) -> str:
+    if value is None or value in ("\n", "\\n"):
+        return "Enter"
+    raw = value.strip()
+    if not raw:
+        return "Enter"
+    aliases = {
+        "enter": "Enter",
+        "return": "Enter",
+        "tab": "Tab",
+        "esc": "Escape",
+        "escape": "Escape",
+        "backspace": "Backspace",
+        "delete": "Delete",
+        "space": "Space",
+        "arrowup": "ArrowUp",
+        "arrowdown": "ArrowDown",
+        "arrowleft": "ArrowLeft",
+        "arrowright": "ArrowRight",
+    }
+    return aliases.get(raw.lower(), raw)
+
+
+def to_locator(page: Page, step: RefinedStep) -> Locator:
+    s, v = step.locator_strategy, step.locator_value
+    if s == "role" and step.role_name:
+        name = _role_accessible_name(step)
+        return (
+            page.get_by_role(step.role_name, name=name, exact=True)
+            if name else page.get_by_role(step.role_name)
+        )
+    if s == "label":
+        return page.get_by_label(v, exact=True)
+    if s == "placeholder":
+        return page.get_by_placeholder(v, exact=True)
+    if s == "text":
+        return _text_locator(page, v, step.host_tag)
+    if s == "testid":
+        return page.get_by_test_id(v)
+    if step.element_index is not None:                       # css / fallback
+        return page.locator(f'[data-ai-index="{step.element_index}"]')
+    return page.locator(v)
 
 
 def locator_expr(step: RefinedStep) -> str:
@@ -316,23 +884,25 @@ def locator_expr(step: RefinedStep) -> str:
     s, v = step.locator_strategy, step.locator_value
 
     if s == "label":
-        return f"get_by_label({q(v)})"
+        return f"get_by_label({q(v)}, exact=True)"
 
     if s == "role":
         role = step.role_name or (v if v in _KNOWN_ARIA_ROLES else "button")
+        name = _role_accessible_name(step)
 
         # <select aria-label="Priority"> → getByLabel('Priority') is more durable
         # than getByRole('listbox', { name: 'Priority' }) and avoids strict-mode issues
-        if role == "listbox" and v and v not in _KNOWN_ARIA_ROLES:
-            return f"get_by_label({q(v)})"
+        if role == "listbox" and name:
+            return f"get_by_label({q(name)}, exact=True)"
 
-        name_part = f", name={q(v)}" if (v and v not in _KNOWN_ARIA_ROLES) else ""
-        return f"get_by_role({q(role)}{name_part})"
+        if name:
+            return f"get_by_role({q(role)}, name={q(name)}, exact=True)"
+        return f"get_by_role({q(role)})"
 
     if s == "placeholder":
-        return f"get_by_placeholder({q(v)})"
+        return f"get_by_placeholder({q(v)}, exact=True)"
     if s == "text":
-        return f"get_by_text({q(v)})"
+        return _text_locator_expr(v, step.host_tag)
     if s == "testid":
         return f"get_by_test_id({q(v)})"
     return f"locator({q(v)})"
@@ -357,8 +927,13 @@ async def execute_step(page: Page, step: RefinedStep, base_url: str) -> None:
         log(f"  Typing value: {step.value!r}")
         await loc.fill(step.value or "")
     elif a == "press":
-        log(f"  Pressing key: {step.value or 'Enter'!r}")
-        await loc.press(step.value or "Enter")
+        key = _normalize_key(step.value)
+        log(f"  Focusing target then pressing {key!r} on the page")
+        try:
+            await loc.focus(timeout=5000)
+        except Exception as e:
+            log(f"  Focus failed ({e}) — sending {key!r} to the focused page", "WARN")
+        await page.keyboard.press(key)
     elif a == "select":
         log(f"  Selecting option: {step.value!r}")
         await loc.select_option(label=step.value) if step.value else None
@@ -374,35 +949,42 @@ async def execute_step(page: Page, step: RefinedStep, base_url: str) -> None:
         await page.wait_for_timeout(ms)
     elif a == "assert":
         # Literal visible strings the model extracted (assert_values); never the
-        # prose description.
+        # prose description. Duplicate names (nav + page title) are OK for
+        # visibility — uniqueness is only required for clicks.
         values = [v for v in (step.assert_values or []) if v]
         if not values and step.value:
-            values = [step.value]
+            values = [v for v in [_primary_visible_text(step.value)] if v]
+        if not values and step.locator_strategy == "text":
+            values = [v for v in [_primary_visible_text(step.locator_value)] if v]
         if len(values) > 1:
-            # Multi-value assert: every string must appear in the shared container.
             for val in values:
                 log(f"  Asserting element contains: {val!r}")
                 await expect(loc).to_contain_text(val, timeout=5000)
         elif len(values) == 1:
-            val = values[0]
+            val = _primary_visible_text(values[0])
+            log(f"  Asserting visible text: {val!r}")
             try:
-                log(f"  Asserting element contains: {val!r}")
-                await expect(loc).to_contain_text(val, timeout=5000)
-            except AssertionError:
-                # The grounded locator and the asserted value disagree — the model
-                # pointed at the wrong element. Re-derive the locator FROM the text
-                # being verified so the two cannot diverge, and write it back so the
-                # generated spec emits the same durable locator.
-                log(f"  Grounded locator did not contain {val!r} — re-grounding via text", "WARN")
-                await expect(page.get_by_text(val)).to_contain_text(val, timeout=5000)
+                n = await loc.count()
+            except Exception:
+                n = 1
+            try:
+                if n > 1:
+                    await expect(loc.first).to_be_visible(timeout=5000)
+                else:
+                    await expect(loc).to_contain_text(val, timeout=5000)
+            except (AssertionError, PlaywrightError):
+                log(f"  Grounded locator did not uniquely contain {val!r} — asserting first visible occurrence", "WARN")
+                await expect(page.get_by_text(val, exact=True).first).to_be_visible(timeout=5000)
                 step.locator_strategy = "text"
                 step.locator_value = val
-                step.role_name = None
-                step.element_index = None
-                log(f"  Re-grounded assert to get_by_text({val!r})", "OK")
+                log(f"  Re-grounded assert to get_by_text({val!r}).first", "OK")
         else:
             log(f"  Asserting element is visible")
-            await expect(loc).to_be_visible(timeout=5000)
+            try:
+                n = await loc.count()
+            except Exception:
+                n = 1
+            await expect((loc.first if n > 1 else loc)).to_be_visible(timeout=5000)
     elif a == "drag":
         raise NotImplementedError("Add drag source/target handling for your app.")
     elif a == "terminate":
@@ -426,6 +1008,12 @@ def _is_element_ref(sel: Optional[str]) -> bool:
     return bool(sel) and (sel.startswith("#") or sel.startswith("."))
 
 
+_PRESS_STEP = re.compile(
+    r"\bpress(?:es|ed)?\s+(enter|return|tab|escape|esc|backspace|delete)\b",
+    re.I,
+)
+
+
 def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
     base_url = plan.get("workflow", {}).get("base_url", "")
     workflow_name = plan.get("workflow", {}).get("name", "(unnamed)")
@@ -441,6 +1029,16 @@ def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
         desc = s.get("description", "")
         hint = (s.get("target") or {}).get("css_selector")
         value = _first_quoted(desc)
+
+        press_match = _PRESS_STEP.search(desc)
+        if press_match and action in ("type", "click", "press"):
+            action = "press"
+            value = _normalize_key(press_match.group(1))
+        elif action == "type" and s.get("input_value") in ("\n", "\\n"):
+            action = "press"
+            value = "Enter"
+        elif action == "press":
+            value = _normalize_key(value or s.get("input_value") or s.get("value") or "Enter")
 
         target = desc + (f"  [parser-guessed selector '{hint}' — UNVERIFIED]" if hint else "")
 
@@ -496,16 +1094,17 @@ async def refine(
     history: list[str] = []
     ambiguities: list[str] = list(warnings)
 
-    log(f"Launching Chromium browser (headless={headless})")
+    log(f"Launching browser (headless={headless})")
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        page = await browser.new_page()
+        browser, context, page = await launch_browser_page(p, headless=headless)
         log(f"Navigating to start URL: {start_url}")
         await page.goto(start_url)
         log(f"Page loaded: {page.url!r}", "OK")
 
+        stop_flow = False
         total = len(fuzzy_steps)
-        for idx, fuzzy in enumerate(fuzzy_steps, 1):
+        try:
+          for idx, fuzzy in enumerate(fuzzy_steps, 1):
             log("")
             log(f"--- Step {fuzzy.step_number} / {total}  [{fuzzy.action}] ---", "STEP")
             log(f"    Target: {fuzzy.target[:100]}")
@@ -534,8 +1133,59 @@ async def refine(
             attempt = 0
             while True:
                 attempt += 1
+                try:
+                    await wait_for_app_page(page, headless=headless)
+                except Exception as e:
+                    log(f"  Step {fuzzy.step_number} blocked by interstitial: {e}", "ERROR")
+                    step = RefinedStep(
+                        step_number=fuzzy.step_number,
+                        action=fuzzy.action,
+                        element_index=None,
+                        locator_strategy="css",
+                        locator_value="n/a",
+                        value=fuzzy.value,
+                        expected_result=fuzzy.expected_result or "",
+                        confidence=0.1,
+                        reclassified=False,
+                        notes=f"⚠️ FAILED after {attempt} attempts: {e}",
+                        assert_values=[],
+                    )
+                    refined_steps.append(step)
+                    ambiguities.append(f"step {step.step_number}: FAILED to execute — {e}")
+                    history.append(f"step {step.step_number}: FAILED, flagged")
+                    stop_flow = True
+                    break
+
                 dom = await snapshot_interactive_dom(page)
                 step = await ground_step(chain, fuzzy, dom, history)
+
+                if not grounding_matches_dom(step, dom) and step.action in _ELEMENT_ACTIONS:
+                    log(
+                        f"  Grounded {step.locator_strategy}:{step.locator_value!r} "
+                        f"is not in this snapshot — not clicking a guessed locator",
+                        "WARN",
+                    )
+                    step.confidence = min(step.confidence, 0.2)
+                    if attempt <= max_retries:
+                        history.append(
+                            f"[retry {attempt}] locator not in snapshot, step {fuzzy.step_number}"
+                        )
+                        await page.wait_for_timeout(1000)
+                        continue
+                    step.notes = (
+                        f"⚠️ FAILED after {attempt} attempts: target {step.locator_value!r} "
+                        f"is not in the live DOM (page {page.url}). "
+                        + (step.notes or "")
+                    )
+                    step.confidence = min(step.confidence, 0.2)
+                    refined_steps.append(step)
+                    ambiguities.append(
+                        f"step {step.step_number}: FAILED to execute — "
+                        f"target {step.locator_value!r} not present in DOM snapshot"
+                    )
+                    history.append(f"step {step.step_number}: FAILED, flagged")
+                    log(f"  Step {fuzzy.step_number} FAILED: target not in snapshot", "ERROR")
+                    break
 
                 if step.confidence < confidence_floor and attempt <= max_retries:
                     log(f"  Confidence {step.confidence:.2f} below floor {confidence_floor} — retrying (attempt {attempt}/{max_retries})", "RETRY")
@@ -544,8 +1194,8 @@ async def refine(
                     continue
                 try:
                     await execute_step(page, step, base_url)
-                    log(f"  Waiting for network idle...")
-                    await page.wait_for_load_state("networkidle", timeout=5000)
+                    log(f"  Waiting for page to settle...")
+                    await wait_for_stable_page(page)
 
                     # Execution succeeded — stamp the step as definitively grounded
                     step.notes = (step.notes or "").replace("⚠️", "").strip() or None
@@ -580,10 +1230,16 @@ async def refine(
                     history.append(f"step {step.step_number}: FAILED, flagged")
                     break
 
-        log("")
-        log(f"All steps processed. Closing browser.")
-        await browser.close()
-        log("Browser closed.", "OK")
+            if stop_flow:
+                log("  Remaining steps skipped — browser is on a bot-check page", "WARN")
+                break
+
+        finally:
+            log("")
+            log("All steps processed. Closing browser.")
+            await context.close()
+            await browser.close()
+            log("Browser closed.", "OK")
 
     return _serialize(plan, fuzzy_steps, refined_steps, original_by_no, ambiguities, base_url)
 

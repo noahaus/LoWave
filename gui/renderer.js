@@ -284,6 +284,7 @@ async function init() {
         refine: $("doRefine").checked,
         generate: $("doGenerate").checked,
         runTests: $("doTest").checked,
+        headed: $("headed").checked,
         specName: $("specName").value.trim() || undefined,
       });
     } catch (err) {
