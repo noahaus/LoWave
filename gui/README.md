@@ -42,7 +42,7 @@ The GUI window uses the same `pipeline-runner.js`. Launch with `npm run gui` (un
 ## Notes
 
 - Defaults to Ollama `qwen3-coder:30b`; switch backend/model in the project run form for cloud APIs.
-- Refine requires the demo app (or your project URL) to be reachable.
+- Refine requires the demo app (or your project URL) to be reachable. **Show browser** is on by default so you can complete captchas; uncheck it for headless refine.
 - Generated specs land in `tests/<steps-stem>.spec.ts`.
 - If the window fails to open in some agent environments, unset `ELECTRON_RUN_AS_NODE` (the `npm run gui` script already does this).
 - While a run is in progress, **Cancel** stops the current stage (`qa-parse` / refine / generate / Playwright) so you can start over.

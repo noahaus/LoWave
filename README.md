@@ -131,7 +131,7 @@ Run any tool with `--help` for its full flag list.
 
 ### Why the refine stage?
 
-The steps LLM cannot see the DOM, so its selectors are guesses. `qa-refine` opens the app, snapshots the visible interactive elements before each step, asks the model to match the step to a *real* element, and emits a durable locator (preferring `data-testid` → ARIA role → label → text). It self-heals on low confidence, can reclassify an action (e.g. a `<select>` mislabeled as a click), and flags anything ambiguous in `metadata.known_ambiguities` for review. You can also hand-write or hand-edit an `action_plan.json` and skip stage 1 entirely.
+The steps LLM cannot see the DOM, so its selectors are guesses. `qa-refine` opens the app, snapshots visible controls before each step (native interactive elements plus custom clickable chips/tabs with a pointer cursor), asks the model to match the step to a *real* element, and emits a durable locator (preferring `data-testid` → ARIA role → label → text). If the site serves a captcha or bot-check page, refine stops instead of clicking text that is not in the DOM; use `--headed` (the GUI **Show browser** option) so you can complete the check. It self-heals on low confidence, can reclassify an action (e.g. a `<select>` mislabeled as a click), and flags anything ambiguous in `metadata.known_ambiguities` for review. You can also hand-write or hand-edit an `action_plan.json` and skip stage 1 entirely.
 
 ---
 

@@ -34,12 +34,23 @@ def q(s) -> str:
     return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
 
 
+def _by_label_js(name: str) -> str:
+    """Accessible-name locator with exact match (avoids 'Search' hitting 'Search by voice')."""
+    return f"page.getByLabel({q(name)}, {{ exact: true }})"
+
+
+def _by_role_js(role: str, name: str | None = None) -> str:
+    if name:
+        return f"page.getByRole({q(role)}, {{ name: {q(name)}, exact: true }})"
+    return f"page.getByRole({q(role)})"
+
+
 def _refined_locator_expr(target: dict) -> str | None:
     """Convert a refined target block into a Playwright page.* call.
 
     refine_plan.py stores the locator as a Python-style expression
-    (e.g. get_by_label("Email")).  We convert it to the TS equivalent
-    (page.getByLabel('Email')).
+    (e.g. get_by_label("Email", exact=True)).  We convert it to the TS equivalent
+    (page.getByLabel('Email', { exact: true })).
     """
     raw = target.get("playwright_locator")
     if not raw:
@@ -58,21 +69,21 @@ def _refined_locator_expr(target: dict) -> str | None:
     for py_name, js_name in snake_to_camel.items():
         expr = expr.replace(py_name + "(", js_name + "(")
 
-    # Convert Python double-quoted strings to single-quoted JS strings
-    # e.g. getByRole("button", name="Sign In") -> getByRole('button', { name: 'Sign In' })
+    # Convert Python args to JS: getByRole("combobox", name="Search", exact=True)
+    # -> getByRole('combobox', { name: 'Search', exact: true })
     def _to_js_args(m):
         inner = m.group(1)
-        # named kwargs: name="foo" -> { name: 'foo' }
         kwargs = re.findall(r'(\w+)="([^"]*)"', inner)
+        bool_kwargs = re.findall(r'(\w+)=(True|False)', inner)
         positional = re.findall(r'^"([^"]*)"', inner)
         parts = []
         if positional:
             parts.append(q(positional[0]))
-        if kwargs:
-            kw_str = ", ".join(f"{k}: {q(v)}" for k, v in kwargs)
-            parts.append("{ " + kw_str + " }")
+        obj_bits = [f"{k}: {q(v)}" for k, v in kwargs]
+        obj_bits.extend(f"{k}: {v.lower()}" for k, v in bool_kwargs)
+        if obj_bits:
+            parts.append("{ " + ", ".join(obj_bits) + " }")
         elif not positional:
-            # fallback: just swap double quotes for single
             parts.append(inner.replace('"', "'"))
         return "(" + ", ".join(parts) + ")"
 
@@ -91,24 +102,28 @@ def _fallback_locator(target: dict, action: str) -> str | None:
     if action == "click":
         name = text or aria
         if name:
-            return f"page.getByRole('button', {{ name: {q(name)} }})"
+            return _by_role_js("button", name)
 
     if action in ("type", "select"):
         if aria:
-            return f"page.getByLabel({q(aria)})"
+            return _by_label_js(aria)
 
     if action == "assert":
         if css in ("h1", "h2", "h3") and text:
-            return f"page.getByRole('heading', {{ name: {q(text)} }})"
+            return _by_role_js("heading", text)
+        if aria:
+            return _by_label_js(aria)
         if css:
             return f"page.locator({q(css)})"
         if text:
-            return f"page.getByText({q(text)})"
+            return f"page.getByText({q(text)}, {{ exact: true }})"
 
+    if aria:
+        return _by_label_js(aria)
     if css:
         return f"page.locator({q(css)})"
     if text:
-        return f"page.getByText({q(text)})"
+        return f"page.getByText({q(text)}, {{ exact: true }})"
     return None
 
 
@@ -183,12 +198,23 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
         expr = _refined_locator_expr(target)
         if expr:
             if text and not _is_prose(text):
+                if "getByText" in expr and ".locator(" not in expr:
+                    return f"await expect({expr}.first).toBeVisible();"
                 return f"await expect({expr}).toContainText({q(text)});"
+            if "getByText" in expr and ".locator(" not in expr:
+                return f"await expect({expr}.first).toBeVisible();"
             return f"await expect({expr}).toBeVisible();"
 
-    # Fallback: heuristic locator
+    # Fallback: heuristic locator — accessible name before guessed CSS
     if css in ("h1", "h2", "h3") and text:
-        return f"await expect(page.getByRole('heading', {{ name: {q(text)} }})).toBeVisible();"
+        return f"await expect({_by_role_js('heading', text)}).toBeVisible();"
+
+    aria = target.get("aria_label")
+    if aria:
+        expr = _by_label_js(aria)
+        return (f"await expect({expr}).toContainText({q(text)});"
+                if text else
+                f"await expect({expr}).toBeVisible();")
 
     if css:
         return (f"await expect(page.locator({q(css)})).toContainText({q(text)});"
@@ -259,10 +285,17 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
             return f"await {loc}.hover();", False
 
     if action == "press":
-        loc = locator(target, action, refinement)
         key = value or "Enter"
+        if key in ("\n", "\\n"):
+            key = "Enter"
+        loc = locator(target, action, refinement)
         if loc:
-            return f"await {loc}.press({q(key)});", False
+            return (
+                f"await {loc}.focus();\n"
+                f"  await page.keyboard.press({q(key)});",
+                False,
+            )
+        return f"await page.keyboard.press({q(key)});", False
 
     if action == "scroll":
         loc = locator(target, action, refinement)

@@ -91,7 +91,7 @@ Output ONE JSON object and nothing else — no prose, no markdown fences. Schema
     {{
       "step": <int, 1-based, in order>,
       "id": "<short_snake_case_id>",
-      "action": "navigate|type|click|select|scroll|hover|drag|wait|assert",
+      "action": "navigate|type|click|select|scroll|hover|drag|wait|assert|press",
       "description": "<what the user should do / verify>",
       "target": {{
         "css_selector": "<best-guess selector if inferable>",
@@ -120,8 +120,15 @@ Rules:
 - Set workflow.base_url to "{base_url}".
 {credentials_rule}
 - Prefer locating elements by visible text / labels named in the instructions.
-- Record validation moments (success toast, confirmation, "assert that…") as
-  "assert" steps.
+- Do not guess a tag-specific CSS selector for search boxes or text fields
+  (they may be <input>, <textarea>, or role=combobox). Prefer aria_label /
+  accessible name. Treat css_selector as a last resort, and if you include
+  name='q' use a tag-agnostic selector such as [name='q'].
+- Record validation moments (success toast, confirmation, "assert that…",
+  "you should see…") as "assert" steps.
+- "Press Enter", "hit return", "press Tab" and similar keystrokes are action
+  "press" with input_value set to the key name (Enter, Tab, Escape). Do not
+  encode Enter as type with a newline.
 - Do NOT invent credentials, URLs, or field values that are not in the steps or
   the rules above.
 - Note significant ambiguities in metadata.known_ambiguities.
@@ -236,13 +243,19 @@ def main():
     system_prompt = build_system_prompt(base_url, username, password)
 
     print(f"{BOLD}━━━ Analysing with {backend} ━━━{RESET}")
-    llm = build_llm(backend, args.model, args.temperature)
+    llm = build_llm(backend, args.model, args.temperature, max_tokens=8192)
     raw = llm.invoke(build_messages(system_prompt, steps_text)).content
 
     try:
         plan = ActionPlan.model_validate_json(extract_json(raw))
     except (ValueError, ValidationError) as e:
         print(f"  {YELLOW}❌ model output did not match the schema:{RESET}\n  {e}")
+        err = str(e).lower()
+        if "eof" in err or "json_invalid" in err or "unterminated" in err:
+            print(
+                f"  {YELLOW}Hint: output looks truncated (the steps array never closed). "
+                f"This is usually a max_tokens cutoff on a long workflow — retry parse.{RESET}"
+            )
         print(f"\n  {DIM}Raw output (first 800 chars):{RESET}\n{str(raw)[:800]}")
         sys.exit(1)
 

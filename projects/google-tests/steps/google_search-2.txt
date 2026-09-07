@@ -5,9 +5,11 @@
 1. Go to https://www.google.com
 2. Type Playwright testing tutorial into the search box
 3. Press Enter
-4. Click Images
+4. The search box should still show Playwright testing tutorial
+5. Click Images
 6. Click All
 7. Clear the search box and type Playwright codegen
 8. Press Enter
 9. Click the first search result
+10. You should leave the Google results page
 11. Go back
