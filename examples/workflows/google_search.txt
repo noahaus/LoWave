@@ -1,0 +1,21 @@
+# Usability: search Google and open a result
+# App: Google Search (https://www.google.com)
+# Covers: homepage search box, results page, query refinement, result navigation
+
+1. Go to https://www.google.com
+2. You should see the search box
+3. Type Playwright testing tutorial into the search box
+4. Press Enter
+5. You should see a list of search results
+6. The search box should still show Playwright testing tutorial
+7. Click Images
+8. You should see image results
+9. Click All
+10. You should see the regular search results again
+11. Clear the search box and type Playwright codegen
+12. Press Enter
+13. You should see results for Playwright codegen
+14. Click the first search result
+15. You should leave the Google results page
+16. Go back
+17. You should see the Playwright codegen search results again

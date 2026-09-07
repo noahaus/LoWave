@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const { runPipeline, REPO_ROOT } = require("./pipeline-runner");
+const { createProjectStore } = require("./project-store");
 
 if (!app || !ipcMain) {
   console.error(
@@ -12,8 +13,11 @@ if (!app || !ipcMain) {
   process.exit(1);
 }
 
+const store = createProjectStore(REPO_ROOT);
+
 let mainWindow = null;
 let running = false;
+let abortController = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -42,15 +46,21 @@ function send(channel, payload) {
 async function executePipeline(opts) {
   if (running) throw new Error("A pipeline run is already in progress");
   running = true;
+  abortController = new AbortController();
   try {
     send("pipeline:event", { type: "run", status: "started" });
     const result = await runPipeline({
       ...opts,
+      signal: abortController.signal,
       onEvent: (evt) => send("pipeline:event", evt),
     });
     send("pipeline:event", { type: "run", status: "finished", result });
     return result;
   } catch (err) {
+    if (err.cancelled) {
+      send("pipeline:event", { type: "run", status: "cancelled", error: err.message });
+      return { cancelled: true };
+    }
     send("pipeline:event", {
       type: "run",
       status: "failed",
@@ -60,26 +70,28 @@ async function executePipeline(opts) {
     throw err;
   } finally {
     running = false;
+    abortController = null;
   }
 }
 
-function listWorkflowExamples() {
-  const dir = path.join(REPO_ROOT, "examples", "workflows");
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith(".txt"))
-    .map((f) => ({
-      name: f,
-      path: path.join(dir, f),
-    }));
+function cancelPipeline() {
+  if (!running || !abortController || abortController.signal.aborted) {
+    return { cancelled: false };
+  }
+  abortController.abort();
+  return { cancelled: true };
 }
 
 function registerIpc() {
-  ipcMain.handle("pipeline:listExamples", () => listWorkflowExamples());
+  ipcMain.handle("projects:list", () => store.seedDemoIfEmpty());
+  ipcMain.handle("projects:get", (_e, slug) => store.getProject(slug));
+  ipcMain.handle("projects:create", (_e, payload) => store.createProject(payload));
+  ipcMain.handle("projects:update", (_e, slug, patch) => store.updateProject(slug, patch));
+  ipcMain.handle("projects:addSteps", (_e, slug, payload) => store.addProjectSteps(slug, payload));
+
   ipcMain.handle("pipeline:pickSteps", async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-      title: "Choose a steps file",
+      title: "Import a steps file",
       defaultPath: path.join(REPO_ROOT, "examples", "workflows"),
       filters: [{ name: "Steps", extensions: ["txt"] }],
       properties: ["openFile"],
@@ -91,6 +103,7 @@ function registerIpc() {
     return fs.readFileSync(filePath, "utf8");
   });
   ipcMain.handle("pipeline:run", async (_e, opts) => executePipeline(opts));
+  ipcMain.handle("pipeline:cancel", () => cancelPipeline());
   ipcMain.handle("pipeline:repoRoot", () => REPO_ROOT);
 }
 
