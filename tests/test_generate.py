@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from qa_pipeline.generate import _refined_locator_expr, emit_assert, emit_step
+from qa_pipeline.generate import _compile_step, _refined_locator_expr, emit_assert, emit_step
 
 
 def _step(expected_outcome: dict, target: dict | None = None) -> dict:
@@ -94,6 +94,18 @@ def test_checkbox_state_uses_playwright_checked_matcher(checked: str, expected: 
     )
 
     assert result == expected
+
+
+def test_checked_state_does_not_also_assert_checkbox_value() -> None:
+    result = emit_assert(
+        _step({"checked": "false", "field_value": "unchecked"}),
+        {"grounded": True},
+    )
+
+    assert result == (
+        "await expect(page.getByLabel('City', { exact: true }))"
+        ".toBeChecked({ checked: false });"
+    )
 
 
 def test_element_count_uses_playwright_count_matcher() -> None:
@@ -196,6 +208,39 @@ def test_refined_text_locator_calls_first_method() -> None:
     result = emit_assert(step, {"grounded": True})
 
     assert result == "await expect(page.getByText('Welcome').first()).toBeVisible();"
+
+
+def test_partial_assertion_surfaces_unhandled_semantics() -> None:
+    result = emit_assert(
+        _step(
+            {
+                "visible_text": "Draft saved",
+                "field_value": 'Full name still shows "Ada", Email still shows "ada@example.com"',
+                "no_error": "No validation errors are displayed",
+            },
+            {"playwright_locator": 'get_by_text("Draft saved")'},
+        ),
+        {"grounded": True},
+    )
+
+    assert "toBeVisible()" in result
+    assert "// TODO: assert step 7 cannot safely express field_value, no_error" in result
+
+
+def test_low_confidence_grounding_is_visible_in_generated_step() -> None:
+    step = {
+        "step": 8,
+        "action": "click",
+        "description": "Open the client.",
+        "target": {"playwright_locator": 'get_by_role("link", name="Client")'},
+        "refinement": {"grounded": True, "confidence": 0.35},
+    }
+
+    result, needs_review = _compile_step(step, "http://localhost:3000")
+
+    assert needs_review is True
+    assert result.startswith("// REVIEW: low-confidence grounding (0.35); verify this locator.\n")
+    assert "getByRole('link', { name: 'Client'" in result
 
 
 def test_url_path_is_safe_inside_javascript_regex_literal() -> None:

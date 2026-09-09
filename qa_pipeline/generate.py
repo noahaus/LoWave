@@ -186,7 +186,19 @@ def _is_prose(text: str | None) -> bool:
     """
     if not text:
         return False
-    prose_signals = ("should", "verifies", "matches", "input value", "ensure", "confirm")
+    prose_signals = (
+        "should",
+        "verifies",
+        "matches",
+        "input value",
+        "ensure",
+        "confirm",
+        " is displayed",
+        " is visible",
+        " is present",
+        "still shows",
+        "non-empty",
+    )
     return (
         len(text) > 80
         or (text[0].isupper() and text.endswith("."))
@@ -207,42 +219,56 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
     num    = step.get("step")
 
     lines: list[str] = []
+    handled: set[str] = set()
     expr = locator(target, "assert", refinement)
 
     # Parser expectations are authoritative. Emit their direct Playwright
     # equivalents before considering any text suggested during grounding.
     if eo.get("url_equals"):
         lines.append(f"await expect(page).toHaveURL({q(eo['url_equals'])});")
+        handled.add("url_equals")
 
     if eo.get("url_contains"):
         lines.append(f"await expect(page).toHaveURL(/{_js_regex_pattern(eo['url_contains'])}/);")
+        handled.add("url_contains")
 
     if eo.get("url_not_contains"):
         lines.append(f"await expect(page).not.toHaveURL(/{_js_regex_pattern(eo['url_not_contains'])}/);")
+        handled.add("url_not_contains")
 
     absent_text = eo.get("visible_text_absent") or eo.get("not_visible_text")
     if absent_text:
         lines.append(
             f"await expect(page.getByText({q(absent_text)}, {{ exact: false }})).toHaveCount(0);"
         )
+        handled.update({key for key in ("visible_text_absent", "not_visible_text") if key in eo})
 
-    if eo.get("field_value") and expr:
+    field_value = eo.get("field_value")
+    if field_value and expr and "checked" not in eo and not _is_prose(str(field_value)):
         lines.append(f"await expect({expr}).toHaveValue({q(eo['field_value'])});")
+        handled.add("field_value")
 
     if "checked" in eo and expr:
         checked = str(eo["checked"]).strip().lower()
         if checked in {"true", "checked", "yes", "1"}:
             lines.append(f"await expect({expr}).toBeChecked({{ checked: true }});")
+            handled.add("checked")
         elif checked in {"false", "unchecked", "no", "0"}:
             lines.append(f"await expect({expr}).toBeChecked({{ checked: false }});")
+            handled.add("checked")
         else:
             return f"// TODO: assert step {num} cannot safely express checked={eo['checked']!r}"
+        if str(field_value).strip().lower() in {"checked", "unchecked"}:
+            handled.add("field_value")
 
     if "element_count" in eo and expr:
         count_match = re.match(r"\s*(\d+)", str(eo["element_count"]))
         if not count_match:
             return f"// TODO: assert step {num} cannot safely express element_count={eo['element_count']!r}"
-        lines.append(f"await expect({expr}).toHaveCount({int(count_match.group(1))});")
+        count = int(count_match.group(1))
+        if not (absent_text and count == 0):
+            lines.append(f"await expect({expr}).toHaveCount({count});")
+        handled.add("element_count")
 
     visible_text = eo.get("text_contains") or eo.get("visible_text")
     if visible_text and not _is_prose(visible_text):
@@ -255,11 +281,19 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
             lines.append(
                 f"await expect(page.getByText({q(visible_text)}, {{ exact: false }})).toBeVisible();"
             )
+        handled.update({key for key in ("text_contains", "visible_text") if key in eo})
 
     if lines:
+        descriptive = {"assertion", "assert_values", "element_visible", "visible_element", "element_state"}
+        unsupported = set(eo) - handled - descriptive
+        if unsupported:
+            lines.append(
+                f"// TODO: assert step {num} cannot safely express "
+                + ", ".join(sorted(unsupported))
+            )
         return "\n  ".join(lines)
 
-    semantic_keys = set(eo) - {"assertion", "assert_values"}
+    semantic_keys = set(eo) - {"assertion", "assert_values", "element_visible", "visible_element", "element_state"}
     if semantic_keys:
         return (
             f"// TODO: assert step {num} cannot safely express "
@@ -401,6 +435,21 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
     return f"// TODO: step {num} has unhandled action {action!r} — {step.get('description','')}", True
 
 
+def _compile_step(step: dict, base_url: str) -> tuple[str, bool]:
+    """Compile a step and preserve low-confidence grounding in the artifact."""
+    line, needs_review = emit_step(step, base_url)
+    refinement = step.get("refinement") or {}
+    confidence = refinement.get("confidence")
+    if (
+        refinement.get("grounded")
+        and isinstance(confidence, (int, float))
+        and confidence < 0.5
+    ):
+        note = f"// REVIEW: low-confidence grounding ({confidence:.2f}); verify this locator."
+        return f"{note}\n  {line}", True
+    return line, needs_review
+
+
 # ──────────────────────────── run ───────────────────────────────────────────
 
 def generate(plan_path: Path, output_path: Path, base_url_override: str | None = None) -> int:
@@ -424,7 +473,7 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
     print(f"  Steps:    {len(steps)}")
     print(f"  Output:   {output_path}\n")
 
-    compiled = [(s, *emit_step(s, base_url)) for s in steps]   # (step, line, is_todo)
+    compiled = [(s, *_compile_step(s, base_url)) for s in steps]   # (step, line, is_todo)
 
     print(f"{BOLD}━━━ Step → Playwright mapping ━━━{RESET}")
     warnings = 0
