@@ -803,7 +803,7 @@ _TEXT_SCOPE_TAGS = {"b", "strong", "h1", "h2", "h3", "h4", "h5", "h6"}
 
 
 def _text_locator_expr(value: str, host_tag: Optional[str] = None) -> str:
-    q = json.dumps
+    q = lambda item: json.dumps(item, ensure_ascii=False)
     v = _primary_visible_text(value)
     tag = (host_tag or "").lower()
     if tag in _TEXT_SCOPE_TAGS:
@@ -933,7 +933,7 @@ def locator_expr(step: RefinedStep) -> str:
     durable — when role==listbox and the locator_value is an accessible name
     (not a role keyword), we emit get_by_label instead.
     """
-    q = json.dumps
+    q = lambda item: json.dumps(item, ensure_ascii=False)
     s, v = step.locator_strategy, step.locator_value
 
     if s == "label":

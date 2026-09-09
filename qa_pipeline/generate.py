@@ -34,6 +34,24 @@ def q(s) -> str:
     return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
 
 
+def _one_line(text) -> str:
+    """Flatten text so a generated line comment cannot become executable code."""
+    return " ".join(str("" if text is None else text).split())
+
+
+_SENTINELS = {"n/a", "n\\a", "na", "none", "null", "nil", "-", "--", "unknown", ""}
+
+
+def _is_sentinel(value) -> bool:
+    """Return True when refinement supplied a placeholder, not a locator."""
+    return isinstance(value, str) and value.strip().lower() in _SENTINELS
+
+
+def _js_regex_pattern(value: str) -> str:
+    """Escape text for a JavaScript regex literal, including its `/` delimiter."""
+    return re.sub(r"([\\/.*+?^${}()|\[\]])", r"\\\1", str(value))
+
+
 def _by_label_js(name: str) -> str:
     """Accessible-name locator with exact match (avoids 'Search' hitting 'Search by voice')."""
     return f"page.getByLabel({q(name)}, {{ exact: true }})"
@@ -52,6 +70,15 @@ def _refined_locator_expr(target: dict) -> str | None:
     (e.g. get_by_label("Email", exact=True)).  We convert it to the TS equivalent
     (page.getByLabel('Email', { exact: true })).
     """
+    strategy = (target.get("strategy") or "").strip().lower()
+    value = target.get("locator_value")
+    if _is_sentinel(value):
+        return None
+    if value and strategy in {"css", "xpath", "testid"}:
+        if strategy == "testid":
+            return f"page.getByTestId({q(value)})"
+        return f"page.locator({q(value)})"
+
     raw = target.get("playwright_locator")
     if not raw:
         return None
@@ -98,6 +125,13 @@ def _fallback_locator(target: dict, action: str) -> str | None:
     aria = target.get("aria_label")
     text = target.get("text_content")
     css  = target.get("css_selector") or ""
+
+    if _is_sentinel(aria):
+        aria = None
+    if _is_sentinel(text):
+        text = None
+    if _is_sentinel(css):
+        css = ""
 
     if action == "click":
         name = text or aria
@@ -178,10 +212,10 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
         lines.append(f"await expect(page).toHaveURL({q(eo['url_equals'])});")
 
     if eo.get("url_contains"):
-        lines.append(f"await expect(page).toHaveURL(/{re.escape(eo['url_contains'])}/);")
+        lines.append(f"await expect(page).toHaveURL(/{_js_regex_pattern(eo['url_contains'])}/);")
 
     if eo.get("url_not_contains"):
-        lines.append(f"await expect(page).not.toHaveURL(/{re.escape(eo['url_not_contains'])}/);")
+        lines.append(f"await expect(page).not.toHaveURL(/{_js_regex_pattern(eo['url_not_contains'])}/);")
 
     absent_text = eo.get("visible_text_absent") or eo.get("not_visible_text")
     if absent_text:
@@ -304,14 +338,14 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
         note = refinement["notes"]
         conf = refinement.get("confidence", 0)
         return (
-            f"// TODO (refinement failed, conf={conf:.2f}): {note}\n"
+            f"// TODO (refinement failed, conf={conf:.2f}): {_one_line(note)}\n"
             f"  // action={action!r}  locator={target.get('playwright_locator')!r}  value={value!r}",
             True,
         )
 
     if action == "navigate":
         url = value or target.get("value") or base_url
-        return f"await page.goto({q(url)}, {{ waitUntil: 'networkidle' }});", False
+        return f"await page.goto({q(url)}, {{ waitUntil: 'load' }});", False
 
     if action in ("type", "select"):
         loc = locator(target, action, refinement)
@@ -329,7 +363,7 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
         return f"await {loc}.click();", False
 
     if action == "wait":
-        return "await page.waitForLoadState('networkidle');", False
+        return "await page.waitForLoadState('load');", False
 
     if action == "assert":
         line = emit_assert(step, refinement)
@@ -357,6 +391,9 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
         loc = locator(target, action, refinement)
         if loc:
             return f"await {loc}.scrollIntoViewIfNeeded();", False
+
+    if action == "terminate":
+        return f"// Flow terminated intentionally at step {num}.", False
 
     return f"// TODO: step {num} has unhandled action {action!r} — {step.get('description','')}", True
 

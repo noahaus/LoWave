@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from qa_pipeline.refine_plan import FuzzyStep, RefinedStep, _serialize, ground_step
+from qa_pipeline.refine_plan import FuzzyStep, RefinedStep, _serialize, ground_step, locator_expr
 
 
 class _FixedChain:
@@ -112,3 +112,23 @@ def test_serialize_preserves_parser_expected_outcomes() -> None:
     assert expected["checked"] == "true"
     assert expected["assertion"] == "Dashboard is visible"
     assert expected["assert_values"] == ["Dashboard"]
+
+
+def test_locator_expression_preserves_unicode_accessible_name() -> None:
+    """Curly punctuation must remain the real character the browser exposes."""
+
+    refined = RefinedStep(
+        step_number=3,
+        action="click",
+        element_index=2,
+        locator_strategy="role",
+        locator_value="I don’t have a fixed location",
+        role_name="button",
+        expected_result="Location fields change",
+        confidence=0.95,
+    )
+
+    expression = locator_expr(refined)
+
+    assert "I don’t have a fixed location" in expression
+    assert r"\u2019" not in expression
