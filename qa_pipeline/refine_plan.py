@@ -693,9 +693,11 @@ async def ground_step(chain, fuzzy: FuzzyStep, dom: list[dict], history: list[st
     step.step_number = fuzzy.step_number           # keep numbering authoritative
     step.reclassified = step.reclassified or (step.action != fuzzy.action)
 
-    # If the LLM forgot to carry over the value for actions that need one, fall back to fuzzy
-    if step.value is None and fuzzy.value is not None and step.action in ("type", "press", "select", "navigate"):
-        log(f"  LLM returned value=None for [{step.action}] — restoring fuzzy value: {fuzzy.value!r}", "WARN")
+    # Parse owns literal values. Refine grounds the target, not what gets typed,
+    # selected, pressed or navigated to.
+    if fuzzy.value is not None and step.action in ("type", "press", "select", "navigate"):
+        if step.value != fuzzy.value:
+            log(f"  Restoring parser value for [{step.action}]: {fuzzy.value!r}", "WARN")
         step.value = fuzzy.value
     if step.action == "press":
         step.value = _normalize_key(step.value or fuzzy.value)
@@ -1340,6 +1342,18 @@ async def refine(
 # 8. Serialize back into the parser's schema (drop-in for the generator)
 # ===========================================================================
 
+def _merge_expected_outcome(original: dict, refined: RefinedStep) -> dict:
+    """Add grounding evidence without discarding the parser's expectations."""
+    merged = dict(original.get("expected_outcome") or {})
+    if refined.expected_result:
+        merged.setdefault("assertion", refined.expected_result)
+    if refined.assert_values:
+        merged["assert_values"] = list(refined.assert_values)
+    else:
+        merged.setdefault("assert_values", [])
+    return merged
+
+
 def _serialize(plan, fuzzy_steps, refined_steps, original_by_no, ambiguities, base_url) -> dict:
     fuzzy_by_no = {f.step_number: f for f in fuzzy_steps}
     out_steps = []
@@ -1360,10 +1374,7 @@ def _serialize(plan, fuzzy_steps, refined_steps, original_by_no, ambiguities, ba
                 "css_selector": r.locator_value if r.locator_strategy == "css" else None,
                 "original_selector": fuzzy.original_selector if fuzzy else None,
             },
-            "expected_outcome": {
-                "assertion": r.expected_result,
-                "assert_values": r.assert_values,
-            },
+            "expected_outcome": _merge_expected_outcome(original, r),
             "refinement": {
                 "confidence": round(r.confidence, 2),
                 # grounded=True if the step actually executed (no FAILED note), regardless of LLM confidence
