@@ -169,9 +169,65 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
     css    = target.get("css_selector") or ""
     num    = step.get("step")
 
-    # URL assertion — always valid
+    lines: list[str] = []
+    expr = locator(target, "assert", refinement)
+
+    # Parser expectations are authoritative. Emit their direct Playwright
+    # equivalents before considering any text suggested during grounding.
+    if eo.get("url_equals"):
+        lines.append(f"await expect(page).toHaveURL({q(eo['url_equals'])});")
+
     if eo.get("url_contains"):
-        return f"await expect(page).toHaveURL(/{re.escape(eo['url_contains'])}/);"
+        lines.append(f"await expect(page).toHaveURL(/{re.escape(eo['url_contains'])}/);")
+
+    if eo.get("url_not_contains"):
+        lines.append(f"await expect(page).not.toHaveURL(/{re.escape(eo['url_not_contains'])}/);")
+
+    absent_text = eo.get("visible_text_absent") or eo.get("not_visible_text")
+    if absent_text:
+        lines.append(
+            f"await expect(page.getByText({q(absent_text)}, {{ exact: false }})).toHaveCount(0);"
+        )
+
+    if eo.get("field_value") and expr:
+        lines.append(f"await expect({expr}).toHaveValue({q(eo['field_value'])});")
+
+    if "checked" in eo and expr:
+        checked = str(eo["checked"]).strip().lower()
+        if checked in {"true", "checked", "yes", "1"}:
+            lines.append(f"await expect({expr}).toBeChecked({{ checked: true }});")
+        elif checked in {"false", "unchecked", "no", "0"}:
+            lines.append(f"await expect({expr}).toBeChecked({{ checked: false }});")
+        else:
+            return f"// TODO: assert step {num} cannot safely express checked={eo['checked']!r}"
+
+    if "element_count" in eo and expr:
+        count_match = re.match(r"\s*(\d+)", str(eo["element_count"]))
+        if not count_match:
+            return f"// TODO: assert step {num} cannot safely express element_count={eo['element_count']!r}"
+        lines.append(f"await expect({expr}).toHaveCount({int(count_match.group(1))});")
+
+    visible_text = eo.get("text_contains") or eo.get("visible_text")
+    if visible_text and not _is_prose(visible_text):
+        if expr:
+            if "getByText" in expr and ".locator(" not in expr:
+                lines.append(f"await expect({expr}.first()).toBeVisible();")
+            else:
+                lines.append(f"await expect({expr}).toContainText({q(visible_text)});")
+        else:
+            lines.append(
+                f"await expect(page.getByText({q(visible_text)}, {{ exact: false }})).toBeVisible();"
+            )
+
+    if lines:
+        return "\n  ".join(lines)
+
+    semantic_keys = set(eo) - {"assertion", "assert_values"}
+    if semantic_keys:
+        return (
+            f"// TODO: assert step {num} cannot safely express "
+            + ", ".join(sorted(semantic_keys))
+        )
 
     # ── multi-value assert (refined plan populates assert_values) ────────────
     assert_values = eo.get("assert_values") or []
