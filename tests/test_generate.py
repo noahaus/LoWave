@@ -80,6 +80,15 @@ def test_field_value_uses_playwright_value_matcher() -> None:
     assert result == "await expect(page.getByLabel('City', { exact: true })).toHaveValue('Antigua');"
 
 
+def test_empty_field_value_is_a_real_assertion() -> None:
+    result = emit_assert(
+        _step({"field_value": ""}),
+        {"grounded": True},
+    )
+
+    assert result == "await expect(page.getByLabel('City', { exact: true })).toHaveValue('');"
+
+
 @pytest.mark.parametrize(
     ("checked", "expected"),
     [

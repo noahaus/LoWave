@@ -1003,15 +1003,17 @@ async def _execute_authored_assertion(page: Page, loc, outcome: dict[str, Any]) 
 
     field_value = outcome.get("field_value")
     multi_field_description = field_value and "still shows" in str(field_value).lower()
-    if field_value and checked_value is None and not multi_field_description:
+    if field_value is not None and checked_value is None and not multi_field_description:
         await expect(loc).to_have_value(str(field_value), timeout=5000)
         handled = True
 
-    if "element_count" in outcome and not absent_text:
+    if "element_count" in outcome:
         count_match = re.match(r"\s*(\d+)", str(outcome["element_count"]))
         if not count_match:
             raise ValueError(f"Unsupported element_count assertion: {outcome['element_count']!r}")
-        await expect(loc).to_have_count(int(count_match.group(1)), timeout=5000)
+        count = int(count_match.group(1))
+        if not (absent_text and count == 0):
+            await expect(loc).to_have_count(count, timeout=5000)
         handled = True
 
     visible_text = outcome.get("text_contains") or outcome.get("visible_text")

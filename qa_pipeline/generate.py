@@ -244,7 +244,7 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
         handled.update({key for key in ("visible_text_absent", "not_visible_text") if key in eo})
 
     field_value = eo.get("field_value")
-    if field_value and expr and "checked" not in eo and not _is_prose(str(field_value)):
+    if field_value is not None and expr and "checked" not in eo and not _is_prose(str(field_value)):
         lines.append(f"await expect({expr}).toHaveValue({q(eo['field_value'])});")
         handled.add("field_value")
 

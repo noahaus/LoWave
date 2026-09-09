@@ -215,10 +215,16 @@ def test_live_refinement_executes_authored_assertion_types(monkeypatch) -> None:
         await _execute_authored_assertion(page, locator, {"url_contains": "/dashboard"})
         await _execute_authored_assertion(page, locator, {"visible_text_absent": "TypeError"})
         await _execute_authored_assertion(page, locator, {"field_value": "Antigua"})
+        await _execute_authored_assertion(page, locator, {"field_value": ""})
         await _execute_authored_assertion(
             page,
             locator,
             {"checked": "false", "field_value": "unchecked"},
+        )
+        await _execute_authored_assertion(
+            page,
+            locator,
+            {"visible_text_absent": "Loading...", "element_count": "1 matching item"},
         )
 
     asyncio.run(run())
@@ -227,5 +233,8 @@ def test_live_refinement_executes_authored_assertion_types(monkeypatch) -> None:
         ("url", "/dashboard"),
         ("count", ("page_text", "TypeError", {"exact": False}), 0),
         ("value", locator, "Antigua"),
+        ("value", locator, ""),
         ("checked", locator, False),
+        ("count", ("page_text", "Loading...", {"exact": False}), 0),
+        ("count", locator, 1),
     ]
