@@ -82,6 +82,7 @@ class FuzzyStep(BaseModel):
     target: str                       # free-text description (+ unverified hint)
     value: Optional[str] = None
     expected_result: Optional[str] = None
+    expected_outcome: dict[str, Any] = Field(default_factory=dict)
     original_selector: Optional[str] = None
 
 
@@ -965,7 +966,68 @@ def locator_expr(step: RefinedStep) -> str:
 # 5. Execute one grounded step + assert its expected result
 # ===========================================================================
 
-async def execute_step(page: Page, step: RefinedStep, base_url: str) -> None:
+async def _execute_authored_assertion(page: Page, loc, outcome: dict[str, Any]) -> bool:
+    """Execute parser-owned assertion semantics without letting grounding rewrite them."""
+    handled = False
+
+    if outcome.get("url_equals"):
+        await expect(page).to_have_url(str(outcome["url_equals"]), timeout=5000)
+        handled = True
+    if outcome.get("url_contains"):
+        await expect(page).to_have_url(
+            re.compile(re.escape(str(outcome["url_contains"]))), timeout=5000
+        )
+        handled = True
+    if outcome.get("url_not_contains"):
+        await expect(page).not_to_have_url(
+            re.compile(re.escape(str(outcome["url_not_contains"]))), timeout=5000
+        )
+        handled = True
+
+    absent_text = outcome.get("visible_text_absent") or outcome.get("not_visible_text")
+    if absent_text:
+        await expect(page.get_by_text(str(absent_text), exact=False)).to_have_count(0)
+        handled = True
+
+    checked_value = outcome.get("checked")
+    if checked_value is not None:
+        normalized = str(checked_value).strip().lower()
+        if normalized in {"true", "checked", "yes", "1"}:
+            checked = True
+        elif normalized in {"false", "unchecked", "no", "0"}:
+            checked = False
+        else:
+            raise ValueError(f"Unsupported checked assertion value: {checked_value!r}")
+        await expect(loc).to_be_checked(checked=checked, timeout=5000)
+        handled = True
+
+    field_value = outcome.get("field_value")
+    multi_field_description = field_value and "still shows" in str(field_value).lower()
+    if field_value and checked_value is None and not multi_field_description:
+        await expect(loc).to_have_value(str(field_value), timeout=5000)
+        handled = True
+
+    if "element_count" in outcome and not absent_text:
+        count_match = re.match(r"\s*(\d+)", str(outcome["element_count"]))
+        if not count_match:
+            raise ValueError(f"Unsupported element_count assertion: {outcome['element_count']!r}")
+        await expect(loc).to_have_count(int(count_match.group(1)), timeout=5000)
+        handled = True
+
+    visible_text = outcome.get("text_contains") or outcome.get("visible_text")
+    if visible_text:
+        await expect(loc).to_contain_text(str(visible_text), timeout=5000)
+        handled = True
+
+    return handled
+
+
+async def execute_step(
+    page: Page,
+    step: RefinedStep,
+    base_url: str,
+    expected_outcome: Optional[dict[str, Any]] = None,
+) -> None:
     loc = to_locator(page, step)
     a = step.action
     log(f"  Executing [{a}] on {step.locator_strategy}:{step.locator_value!r}")
@@ -1001,6 +1063,9 @@ async def execute_step(page: Page, step: RefinedStep, base_url: str) -> None:
         log(f"  Waiting {ms}ms")
         await page.wait_for_timeout(ms)
     elif a == "assert":
+        if expected_outcome and await _execute_authored_assertion(page, loc, expected_outcome):
+            log("  Authored assertion executed", "OK")
+            return
         # Literal visible strings the model extracted (assert_values); never the
         # prose description. Duplicate names (nav + page title) are OK for
         # visibility — uniqueness is only required for clicks.
@@ -1081,7 +1146,8 @@ def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
         action = s["action"]
         desc = s.get("description", "")
         hint = (s.get("target") or {}).get("css_selector")
-        value = _first_quoted(desc)
+        parsed_value = s.get("input_value") if "input_value" in s else s.get("value")
+        value = parsed_value if parsed_value is not None else _first_quoted(desc)
 
         press_match = _PRESS_STEP.search(desc)
         if press_match and action in ("type", "click", "press"):
@@ -1098,8 +1164,8 @@ def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
         if action == "navigate":
             if not seen_first_navigate:
                 seen_first_navigate = True
-                value = base_url
-                log(f"  Step {step_no}: first navigate -> using base_url {base_url!r}")
+                value = value or base_url
+                log(f"  Step {step_no}: first navigate -> using {value!r}")
             elif _is_element_ref(hint):
                 action = "wait"       # spurious "navigate to #page" = a transition result
                 value = None
@@ -1117,6 +1183,7 @@ def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
             target=target,
             value=value,
             expected_result=desc,
+            expected_outcome=dict(s.get("expected_outcome") or {}),
             original_selector=hint,
         ))
     log(f"Plan adapted — {len(steps)} fuzzy step(s) ready  ({len(warnings)} pre-flight warning(s))")
@@ -1201,7 +1268,7 @@ async def refine(
                     assert_values=[last_flash],
                 )
                 try:
-                    await execute_step(page, step, base_url)
+                    await execute_step(page, step, base_url, fuzzy.expected_outcome)
                 except Exception as e:
                     log(
                         f"  Flash already dismissed ({e}) — accepting captured {last_flash!r}",
@@ -1279,7 +1346,7 @@ async def refine(
                     await page.wait_for_timeout(500)
                     continue
                 try:
-                    await execute_step(page, step, base_url)
+                    await execute_step(page, step, base_url, fuzzy.expected_outcome)
                     log(f"  Waiting for page to settle...")
                     flash = await wait_for_ui_settle(
                         page,
