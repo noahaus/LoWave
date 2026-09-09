@@ -82,6 +82,9 @@ def _refined_locator_expr(target: dict) -> str | None:
     raw = target.get("playwright_locator")
     if not raw:
         return None
+    sole_argument = re.fullmatch(r"\s*locator\(\s*(['\"])(.*?)\1\s*\)\s*", raw)
+    if sole_argument and _is_sentinel(sole_argument.group(2)):
+        return None
 
     # Python snake_case -> JS camelCase method names
     snake_to_camel = {
@@ -289,7 +292,7 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
         if expr:
             if text and not _is_prose(text):
                 if "getByText" in expr and ".locator(" not in expr:
-                    return f"await expect({expr}.first).toBeVisible();"
+                    return f"await expect({expr}.first()).toBeVisible();"
                 return f"await expect({expr}).toContainText({q(text)});"
             if "getByText" in expr and ".locator(" not in expr:
                 return f"await expect({expr}.first).toBeVisible();"

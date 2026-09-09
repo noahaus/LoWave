@@ -166,6 +166,38 @@ def test_sentinel_locator_becomes_todo_instead_of_invalid_css() -> None:
     assert result.startswith("// TODO: step 5 click has no locatable target")
 
 
+def test_raw_sentinel_locator_becomes_todo() -> None:
+    step = {
+        "step": 6,
+        "action": "click",
+        "description": "Click a control that was not found.",
+        "target": {"playwright_locator": 'locator("n/a")'},
+        "refinement": {"grounded": True},
+    }
+
+    result, is_todo = emit_step(step, "http://localhost:3000")
+
+    assert is_todo is True
+    assert result.startswith("// TODO: step 6 click has no locatable target")
+
+
+def test_refined_text_locator_calls_first_method() -> None:
+    step = {
+        "step": 7,
+        "action": "assert",
+        "description": "Confirm the welcome message.",
+        "target": {
+            "playwright_locator": 'get_by_text("Welcome")',
+            "text_content": "Welcome",
+        },
+        "expected_outcome": {},
+    }
+
+    result = emit_assert(step, {"grounded": True})
+
+    assert result == "await expect(page.getByText('Welcome').first()).toBeVisible();"
+
+
 def test_url_path_is_safe_inside_javascript_regex_literal() -> None:
     result = emit_assert(
         _step({"url_contains": "/marketplace-terms"}),
