@@ -191,7 +191,7 @@ _EXTRACT_JS = r"""
     el.setAttribute('data-ai-index', String(i));   // ephemeral handle for THIS snapshot
     const r = el.getBoundingClientRect();
     const label = el.getAttribute('aria-label') ||
-                  (el.labels && el.labels[0] && el.labels[0].innerText) || null;
+                  (el.labels && el.labels[0] && el.labels[0].textContent) || null;
     const tag = el.tagName.toLowerCase();
     const explicitRole = el.getAttribute('role');
     const implicitRole = explicitRole || (
@@ -206,7 +206,9 @@ _EXTRACT_JS = r"""
       (tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' || tag === 'h5' || tag === 'h6') ? 'heading' :
       null
     );
-    const rawText = (el.innerText || el.value || '').trim();
+    // Playwright accessible-name and text locators match source text, while
+    // innerText includes CSS transformations such as text-transform: uppercase.
+    const rawText = (el.textContent || el.value || '').trim();
     const firstLine = rawText.split(/\n/).map(s => s.trim()).filter(Boolean)[0] || rawText;
     return {
       index: i,

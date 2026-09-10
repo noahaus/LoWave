@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+from playwright.async_api import async_playwright
+
 from qa_pipeline.refine_plan import (
     FuzzyStep,
     RefinedStep,
@@ -12,6 +14,8 @@ from qa_pipeline.refine_plan import (
     adapt_plan,
     ground_step,
     locator_expr,
+    snapshot_interactive_dom,
+    to_locator,
 )
 
 
@@ -140,6 +144,44 @@ def test_locator_expression_preserves_unicode_accessible_name() -> None:
 
     assert "I don’t have a fixed location" in expression
     assert r"\u2019" not in expression
+
+
+def test_snapshot_name_still_matches_when_css_changes_visual_case() -> None:
+    """CSS capitalization must not make a grounded role locator miss its control."""
+
+    async def run() -> None:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(channel="chrome", headless=True)
+            try:
+                page = await browser.new_page()
+                await page.set_content(
+                    """
+                    <style>button { text-transform: uppercase; }</style>
+                    <button onclick="this.dataset.clicked = 'yes'">Insights</button>
+                    """
+                )
+
+                dom = await snapshot_interactive_dom(page)
+                button = next(element for element in dom if element["role"] == "button")
+                step = RefinedStep(
+                    step_number=1,
+                    action="click",
+                    element_index=button["index"],
+                    locator_strategy="role",
+                    locator_value=button["text"],
+                    role_name="button",
+                    expected_result="Insights opens",
+                    confidence=0.95,
+                )
+
+                await to_locator(page, step).click()
+
+                assert button["text"] == "Insights"
+                assert await page.locator("button").get_attribute("data-clicked") == "yes"
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
 
 
 def test_adapter_preserves_parser_values_before_grounding() -> None:
