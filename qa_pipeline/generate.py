@@ -31,7 +31,14 @@ CYAN = "\033[96m"
 def q(s) -> str:
     """Single-quoted JS/TS string literal with proper escaping."""
     s = "" if s is None else str(s)
-    return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
+    return (
+        "'"
+        + s.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        + "'"
+    )
 
 
 def _one_line(text) -> str:
@@ -275,6 +282,7 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
         if expr:
             if "getByText" in expr and ".locator(" not in expr:
                 lines.append(f"await expect({expr}.first()).toBeVisible();")
+                lines.append(f"await expect({expr}.first()).toContainText({q(visible_text)});")
             else:
                 lines.append(f"await expect({expr}).toContainText({q(visible_text)});")
         else:

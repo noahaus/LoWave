@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
+
+import pytest
 
 from playwright.async_api import async_playwright
 
@@ -17,6 +20,46 @@ from qa_pipeline.refine_plan import (
     snapshot_interactive_dom,
     to_locator,
 )
+
+
+@pytest.mark.parametrize("fails", [True, False])
+def test_captured_flash_does_not_override_authored_assertion(monkeypatch, fails) -> None:
+    """The real refine loop must serialize failed authored checks as ungrounded."""
+    import qa_pipeline.refine_plan as module
+
+    page = AsyncMock()
+    page.url = "http://localhost/login"
+    browser, context = AsyncMock(), AsyncMock()
+    runtime = AsyncMock()
+    monkeypatch.setattr(module, "async_playwright", lambda: runtime)
+    monkeypatch.setattr(module, "launch_browser_page", AsyncMock(return_value=(browser, context, page)))
+    monkeypatch.setattr(module, "build_refiner", lambda *_: object())
+    monkeypatch.setattr(module, "wait_for_app_page", AsyncMock())
+    monkeypatch.setattr(module, "snapshot_interactive_dom", AsyncMock(return_value=[]))
+    monkeypatch.setattr(module, "wait_for_ui_settle", AsyncMock(return_value="Saved"))
+
+    async def ground(_chain, fuzzy, _dom, _history):
+        return RefinedStep(step_number=fuzzy.step_number, action=fuzzy.action,
+                           locator_strategy="css", locator_value="body",
+                           confidence=1.0, expected_result="Saved")
+
+    async def execute(_page, step, _base_url, outcome):
+        if step.action == "assert" and fails:
+            raise AssertionError("Authored URL did not match")
+
+    monkeypatch.setattr(module, "ground_step", ground)
+    monkeypatch.setattr(module, "execute_step", execute)
+    plan = {"workflow": {"title": "Save", "base_url": "http://localhost"},
+            "metadata": {}, "steps": [
+                {"step": 1, "action": "wait", "description": "Wait for save"},
+                {"step": 2, "action": "assert", "description": "Verify toast Saved",
+                 "expected_outcome": {"url_contains": "/dashboard"}},
+            ]}
+    result = asyncio.run(module.refine(plan, None, "openai", None, True, 0, 0.5))
+    assertion = result["steps"][1]["refinement"]
+    assert assertion["grounded"] is (not fails)
+    if fails:
+        assert "Authored URL did not match" in assertion["notes"]
 
 
 class _FixedChain:

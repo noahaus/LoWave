@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from qa_pipeline.generate import _compile_step, _refined_locator_expr, emit_assert, emit_step
+from qa_pipeline.generate import _compile_step, _refined_locator_expr, emit_assert, emit_step, q
 
 
 def _step(expected_outcome: dict, target: dict | None = None) -> dict:
@@ -78,6 +78,18 @@ def test_field_value_uses_playwright_value_matcher() -> None:
     )
 
     assert result == "await expect(page.getByLabel('City', { exact: true })).toHaveValue('Antigua');"
+
+
+def test_authored_text_survives_a_substitute_text_locator() -> None:
+    result = emit_assert(
+        _step({"visible_text": "Email Campaigns"},
+              {"playwright_locator": 'get_by_text("Sign in")'}),
+        {"grounded": True},
+    )
+    assert result == (
+        "await expect(page.getByText('Sign in').first()).toBeVisible();\n  "
+        "await expect(page.getByText('Sign in').first()).toContainText('Email Campaigns');"
+    )
 
 
 def test_empty_field_value_is_a_real_assertion() -> None:
@@ -259,6 +271,11 @@ def test_url_path_is_safe_inside_javascript_regex_literal() -> None:
     )
 
     assert result == r"await expect(page).toHaveURL(/\/marketplace-terms/);"
+
+
+def test_js_string_escapes_carriage_returns() -> None:
+    """CR must not be emitted literally, where it terminates a JS string."""
+    assert q("line one\rline two") == "'line one\\rline two'"
 
 
 def test_navigation_waits_for_load_not_network_idle() -> None:

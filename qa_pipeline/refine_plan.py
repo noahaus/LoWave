@@ -1255,7 +1255,9 @@ async def refine(
                 history.append(f"step {step.step_number}: terminate (end of flow)")
                 continue
 
-            if _is_flash_assert(fuzzy) and last_flash:
+            # Captured flash evidence cannot establish authored URL, field, or
+            # text expectations. Run those through normal execution and retry.
+            if _is_flash_assert(fuzzy) and last_flash and not fuzzy.expected_outcome:
                 log(f"  Toast/status assert using captured message {last_flash!r}", "OK")
                 step = RefinedStep(
                     step_number=fuzzy.step_number,
