@@ -25,7 +25,7 @@ Everything app-specific — the URL under test, login credentials, LLM provider 
 
 - **Python 3.10+**
 - **Node.js 18+** (for Playwright)
-- An **LLM backend**: an API key for Anthropic / OpenAI / Google, *or* a local [Ollama](https://ollama.com) install.
+- An **LLM backend**: an API key for Anthropic / OpenAI / Google, a local [Ollama](https://ollama.com) install, or a signed-in Claude Code / Codex CLI.
 
 ## Install
 
@@ -50,9 +50,30 @@ Copy `.env.example` to `.env` and set what you need. Every value also has a matc
 |----------|---------|---------|
 | `QA_BASE_URL` | URL of the app under test | `http://localhost:3000` |
 | `QA_USERNAME` / `QA_PASSWORD` | Login for workflows with a sign-in step (optional) | read from the steps file |
-| `LLM_BACKEND` | `anthropic` \| `openai` \| `google` \| `ollama` | `anthropic` |
+| `LLM_BACKEND` | `anthropic` \| `openai` \| `google` \| `ollama` \| `claude-cli` \| `codex-cli` | `anthropic` |
 | `QA_MODEL` | Pin a specific model (optional) | per-backend default |
 | `ANTHROPIC_API_KEY` etc. | Credentials for your chosen backend | — |
+
+### Use an existing Claude Code or Codex subscription
+
+The optional CLI backends run through a provider CLI that is already installed
+and signed in on the machine. Prompts travel over stdin and Codex runs with a
+read-only filesystem sandbox.
+
+```bash
+# Claude Code subscription
+claude auth status
+LLM_BACKEND=claude-cli qa-parse steps.txt action_plan.json
+
+# ChatGPT / Codex subscription
+codex login status
+LLM_BACKEND=codex-cli qa-parse steps.txt action_plan.json
+```
+
+Leave `QA_MODEL` and the GUI's Model field blank to use the selected CLI's
+configured default. These backends are optional because provider subscription
+terms can differ from API terms; confirm the intended use before presenting
+subscription access as a supported commercial integration.
 
 ---
 
@@ -141,6 +162,7 @@ The steps LLM cannot see the DOM, so its selectors are guesses. `qa-refine` open
 .
 ├── qa_pipeline/            # the Python tool
 │   ├── config.py           # env/CLI settings resolution
+│   ├── cli_chat.py         # optional Claude Code / Codex subscription wrappers
 │   ├── llm.py              # shared LangChain model factory
 │   ├── parse_steps.py      # stage 1: steps.txt → action_plan.json
 │   ├── refine_plan.py      # stage 2: ground plan on live DOM

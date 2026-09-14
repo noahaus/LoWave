@@ -7,6 +7,10 @@ const path = require("path");
 
 const REPO_ROOT = path.resolve(__dirname, "..");
 
+function defaultModelForBackend(backend) {
+  return backend === "ollama" ? "qwen3-coder:30b" : undefined;
+}
+
 function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName) {
   const canonicalSteps = fs.realpathSync(stepsPath);
   let stem;
@@ -66,17 +70,18 @@ function stopChild(child) {
     return;
   }
   try {
-    process.kill(pid, "SIGTERM");
+    process.kill(-pid, "SIGTERM");
   } catch {
     // already gone
   }
   setTimeout(() => {
     try {
-      if (child.exitCode == null) process.kill(pid, "SIGKILL");
+      // Descendants may survive even when the direct Python child has exited.
+      process.kill(-pid, "SIGKILL");
     } catch {
       // already gone
     }
-  }, 800);
+  }, 800).unref();
 }
 
 const INCOMPLETE_EXIT_CODE = 2;
@@ -121,6 +126,8 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
       cwd,
       env: { ...process.env, ...env, PYTHONUNBUFFERED: "1" },
       shell: false,
+      // A dedicated POSIX process group lets Stop terminate Python and its CLIs.
+      detached: process.platform !== "win32",
     });
 
     const push = (chunk, stream) => {
@@ -190,7 +197,7 @@ async function runPipeline(opts) {
     stepsPath,
     baseUrl = "http://localhost:3000",
     backend = "ollama",
-    model = "qwen3-coder:30b",
+    model = defaultModelForBackend(backend),
     username = "demo@kestrel.app",
     password = "test1234",
     parse = true,
@@ -330,5 +337,6 @@ module.exports = {
   runEventFromError,
   REPO_ROOT,
   resolveCli,
+  defaultModelForBackend,
   INCOMPLETE_EXIT_CODE,
 };

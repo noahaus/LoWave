@@ -63,6 +63,18 @@ const stageState = { parse: "idle", refine: "idle", generate: "idle", test: "idl
 
 let currentProject = null;
 let selectedStepsPath = "";
+let suggestedModel = "qwen3-coder:30b";
+
+function syncBackendModel() {
+  const backend = $("backend").value;
+  const model = $("model");
+  const nextSuggestion = backend === "ollama" ? "qwen3-coder:30b" : "";
+  if (!model.value.trim() || model.value === suggestedModel) {
+    model.value = nextSuggestion;
+  }
+  model.placeholder = nextSuggestion || "provider default";
+  suggestedModel = nextSuggestion;
+}
 
 function setStatus(text, cls = "") {
   statusEl.textContent = text;
@@ -199,6 +211,8 @@ async function openProject(slug) {
 async function init() {
   await refreshHome();
   showHome();
+  $("backend").addEventListener("change", syncBackendModel);
+  syncBackendModel();
 
   $("createBtn").addEventListener("click", async () => {
     try {

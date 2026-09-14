@@ -35,7 +35,10 @@ DEFAULT_MODELS = {
     "openai": "gpt-4o",
     "google": "gemini-1.5-pro",
     "ollama": "qwen2.5:7b",
+    "claude-cli": None,
+    "codex-cli": None,
 }
+BACKENDS = tuple(DEFAULT_MODELS)
 
 
 def _resolve(cli_value, env_key, default=None):
@@ -64,7 +67,7 @@ def password(cli_value: str | None = None) -> str | None:
 
 
 def backend(cli_value: str | None = None) -> str:
-    """LLM provider: anthropic | openai | google | ollama."""
+    """Resolve an API, local, or signed-in subscription CLI backend."""
     return _resolve(cli_value, "LLM_BACKEND", DEFAULT_BACKEND)
 
 

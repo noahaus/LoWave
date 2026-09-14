@@ -211,7 +211,7 @@ def main():
     ap.add_argument("steps", type=Path, help="Path to a .txt file of numbered instructions")
     ap.add_argument("output", type=Path, nargs="?", default=Path("action_plan.json"))
     ap.add_argument("--backend", default=None,
-                    choices=["ollama", "anthropic", "openai", "google"],
+                    choices=config.BACKENDS,
                     help="LLM provider (default: $LLM_BACKEND or anthropic)")
     ap.add_argument("--model", default=None, help="override the backend's default model")
     ap.add_argument("--temperature", type=float, default=0.0)

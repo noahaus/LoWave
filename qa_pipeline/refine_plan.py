@@ -1478,7 +1478,7 @@ def main() -> None:
     ap.add_argument("--out", default="refined_action_plan.json", help="Where to write the refined plan")
     ap.add_argument("--url", default=None, help="Start URL (defaults to workflow.base_url, then $QA_BASE_URL)")
     ap.add_argument("--backend", default=None,
-                    choices=["ollama", "anthropic", "openai", "google"],
+                    choices=config.BACKENDS,
                     help="LLM provider for grounding (default: $LLM_BACKEND or anthropic)")
     ap.add_argument("--model", default=None, help="override the backend's default model")
     ap.add_argument("--headed", action="store_true", help="Run the browser headed (visible)")
