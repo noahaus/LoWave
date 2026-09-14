@@ -43,6 +43,8 @@ The GUI window uses the same `pipeline-runner.js`. Launch with `npm run gui` (un
 
 - Defaults to Ollama `qwen3-coder:30b`; switch backend/model in the project run form for cloud APIs.
 - Refine requires the demo app (or your project URL) to be reachable. **Show browser** is on by default so you can complete captchas; uncheck it for headless refine.
-- Generated specs land in `tests/<steps-stem>.spec.ts`.
+- Latest artifacts are scoped to the canonical steps path, its contents, base URL, and selected spec name. Plans live in `.qa-pipeline/workflows/<workflow-hash>/`; generated specs live under `tests/generated/<workflow-hash>/` so Playwright still discovers them. Re-running the unchanged workflow reuses those paths, while changing its steps or target uses a new scope.
+- Skipping parse requires that workflow scope's raw action plan before refine or generate can run. Skipping refine makes generate use that raw plan. Skipping generate requires that scope's generated spec before tests can run. The runner fails before invoking a CLI when a prerequisite is missing.
+- Existing root-level plans and specs are left untouched. This update does not migrate or delete them.
 - If the window fails to open in some agent environments, unset `ELECTRON_RUN_AS_NODE` (the `npm run gui` script already does this).
 - While a run is in progress, **Cancel** stops the current stage (`qa-parse` / refine / generate / Playwright) so you can start over.

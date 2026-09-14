@@ -1,10 +1,50 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
 const REPO_ROOT = path.resolve(__dirname, "..");
+
+function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName) {
+  const canonicalSteps = fs.realpathSync(stepsPath);
+  let stem;
+  if (hasExplicitSpecName) {
+    if (
+      typeof specName !== "string" ||
+      !specName.trim() ||
+      specName === "." ||
+      specName === ".." ||
+      !/^[A-Za-z0-9_.-]+$/.test(specName)
+    ) {
+      throw new Error("Explicit spec name must be a safe filename");
+    }
+    stem = specName;
+  } else {
+    stem = path
+      .basename(canonicalSteps, path.extname(canonicalSteps))
+      .replace(/[^\w.-]+/g, "_") || "generated";
+  }
+
+  const identity = crypto
+    .createHash("sha256")
+    .update(canonicalSteps)
+    .update("\0")
+    .update(fs.readFileSync(canonicalSteps))
+    .update("\0")
+    .update(baseUrl)
+    .update("\0")
+    .update(stem)
+    .digest("hex");
+  const workflowDir = path.join(REPO_ROOT, ".qa-pipeline", "workflows", identity);
+
+  return {
+    actionPlan: path.join(workflowDir, "action_plan.json"),
+    refinedPlan: path.join(workflowDir, "refined_action_plan.json"),
+    specPath: path.join(REPO_ROOT, "tests", "generated", identity, `${stem}.spec.ts`),
+  };
+}
 
 function resolveCli(name) {
   const candidates = [
@@ -149,12 +189,28 @@ async function runPipeline(opts) {
     throw new Error(`Steps file not found: ${resolvedSteps}`);
   }
 
-  const stem =
-    specName ||
-    path.basename(resolvedSteps, path.extname(resolvedSteps)).replace(/[^\w.-]+/g, "_");
-  const actionPlan = path.join(REPO_ROOT, "action_plan.json");
-  const refinedPlan = path.join(REPO_ROOT, "refined_action_plan.json");
-  const specPath = path.join(REPO_ROOT, "tests", `${stem}.spec.ts`);
+  const { actionPlan, refinedPlan, specPath } = workflowPaths(
+    resolvedSteps,
+    baseUrl,
+    specName,
+    Object.hasOwn(opts, "specName") && specName !== undefined
+  );
+
+  if (!parse && refine && !fs.existsSync(actionPlan)) {
+    throw new Error(
+      `Scoped action plan is required when parse is skipped: ${actionPlan}. Run parse for this workflow first.`
+    );
+  }
+  if (!parse && !refine && generate && !fs.existsSync(actionPlan)) {
+    throw new Error(
+      `Scoped action plan is required when parse and refine are skipped: ${actionPlan}. Run parse for this workflow first.`
+    );
+  }
+  if (!generate && runTests && !fs.existsSync(specPath)) {
+    throw new Error(
+      `Scoped generated spec is required when generate is skipped: ${specPath}. Run generate for this workflow first.`
+    );
+  }
 
   const llmArgs = [];
   if (backend) llmArgs.push("--backend", backend);
@@ -172,6 +228,7 @@ async function runPipeline(opts) {
 
   throwIfCancelled();
   if (parse) {
+    fs.mkdirSync(path.dirname(actionPlan), { recursive: true });
     emit("parse", "running", "steps → action_plan.json");
     const args = [
       resolvedSteps,
@@ -205,6 +262,7 @@ async function runPipeline(opts) {
 
   throwIfCancelled();
   if (generate) {
+    fs.mkdirSync(path.dirname(specPath), { recursive: true });
     emit("generate", "running", "plan → Playwright spec");
     const planIn = refine && fs.existsSync(refinedPlan) ? refinedPlan : actionPlan;
     await runCommand(
