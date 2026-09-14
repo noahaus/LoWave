@@ -84,7 +84,7 @@ function stopChild(child) {
   }, 800).unref();
 }
 
-const INCOMPLETE_EXIT_CODE = 2;
+const INCOMPLETE_EXIT_CODE = 3;
 
 function cancelledError(stdout = "", stderr = "") {
   const err = new Error("Pipeline cancelled");

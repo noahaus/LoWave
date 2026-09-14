@@ -8,7 +8,7 @@ const python = path.join(repo, ".venv", "bin", "python");
 const generatedRoot = path.join(repo, "tests", "generated");
 fs.mkdirSync(generatedRoot, { recursive: true });
 const tmp = fs.mkdtempSync(path.join(generatedRoot, "verify-incomplete-"));
-const pageUrl = "data:text/html," + encodeURIComponent("<!doctype html><h1>Ready</h1>");
+const pageUrl = "data:text/html," + encodeURIComponent('<!doctype html><h1>Ready</h1><button>Save (draft)</button><button>Save "draft"</button>');
 
 function writePlan(name, steps) {
   const plan = path.join(tmp, `${name}.json`);
@@ -47,11 +47,23 @@ const completePlan = writePlan("complete-ready", [
     step: 2,
     action: "assert",
     description: "The heading is visible.",
-    target: { playwright_locator: 'get_by_role("heading", name="Ready")', css_selector: "h1", text_content: "Ready" },
-    expected_outcome: { visible_text: "Ready" },
+    target: { playwright_locator: 'get_by_text("Ready")' },
+    expected_outcome: {},
     refinement: { grounded: true, confidence: 1 },
   },
 ]);
+// Exercise punctuation-bearing accessible names in a real generated browser run.
+const completeData = JSON.parse(fs.readFileSync(completePlan, "utf8"));
+for (const name of ['Save (draft)', 'Save "draft"']) {
+  completeData.steps.push({
+    step: completeData.steps.length + 1,
+    action: "click",
+    target: { playwright_locator: `get_by_role("button", name=${JSON.stringify(name)}, exact=True)` },
+    refinement: { grounded: true, confidence: 1 },
+  });
+}
+fs.writeFileSync(completePlan, JSON.stringify(completeData));
+
 const incompletePlan = writePlan("incomplete-todo", [
   {
     step: 1,
@@ -118,9 +130,9 @@ function noNavigationFailure(output) {
 }
 
 check("complete generate exit 0", completeGen.status === 0, completeGen.stderr);
-check("incomplete generate exit 2", incompleteGen.status === 2, incompleteGen.stderr);
+check("incomplete generate exit 3", incompleteGen.status === 3, incompleteGen.stderr);
 check("allow-incomplete generate exit 0", allowGen.status === 0, allowGen.stderr);
-check("failed-grounding generate exit 2", failedGroundingGen.status === 2, failedGroundingGen.stderr);
+check("failed-grounding generate exit 3", failedGroundingGen.status === 3, failedGroundingGen.stderr);
 check("incomplete spec has runtime guard before goto", (() => {
   const spec = fs.readFileSync(incompleteSpec, "utf8");
   return spec.includes("throw new Error('Generated spec is incomplete:")

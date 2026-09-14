@@ -86,7 +86,7 @@ test("incomplete generate is a distinct run result and never starts Playwright",
   assert.ok(err, "incomplete generation must not resolve as success");
   assert.equal(err.incomplete, true);
   assert.equal(err.cancelled, undefined);
-  assert.equal(err.exitCode ?? err.code, 2);
+  assert.equal(err.exitCode ?? err.code, 3);
   assert.equal(fs.existsSync(scoped.specPath), true);
   assert.match(fs.readFileSync(scoped.specPath, "utf8"), /throw new Error/);
   assert.equal(events.some((event) => event.stage === "test"), false);
@@ -183,7 +183,7 @@ test("renderer incomplete event unlocks controls and asks for review", () => {
   applyPipelineEvent({
     type: "run",
     status: "incomplete",
-    error: "qa-generate exited with code 2",
+    error: "qa-generate exited with code 3",
     result: { specPath: "/tmp/draft.spec.ts", incomplete: true },
   }, ui);
 

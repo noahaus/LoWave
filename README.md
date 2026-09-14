@@ -214,7 +214,7 @@ See `examples/` for full samples.
 - **Schema/JSON errors from stage 1** — the model returned prose; try a stronger model via `--model`, or tighten the wording of ambiguous steps.
 - **No numbered steps found** — each instruction must start with `1.` / `2)` style numbering.
 - **`qa-refine` can't reach the app** — confirm it's actually serving at `QA_BASE_URL`.
-- **TODO comments in the generated spec** — a required step couldn't be compiled. The spec is still written for inspection, but `qa-generate` exits 2 and the generated test throws before page actions so Playwright cannot pass the remaining steps. Use `--allow-incomplete` only to export that draft with exit 0; the runtime guard stays. Check `metadata.known_ambiguities` and refine or edit the plan. An empty workflow is incomplete. An intentional `terminate` step is a complete, explicit stop.
+- **TODO comments in the generated spec** — a required step couldn't be compiled. The spec is still written for inspection, but `qa-generate` exits 3 and the generated test throws before page actions so Playwright cannot pass the remaining steps. Exit 2 remains a command usage error. Use `--allow-incomplete` only to export that draft with exit 0; the runtime guard stays. Check `metadata.known_ambiguities` and refine or edit the plan. An empty workflow is incomplete. An intentional `terminate` step is a complete, explicit stop.
 
 ## License
 
