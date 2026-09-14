@@ -14,6 +14,7 @@ remains inspectable, but the generated test fails before page actions.
     python -m qa_pipeline.generate refined_action_plan.json tests/generated.spec.ts
 """
 import re
+import ast
 import json
 import argparse
 from pathlib import Path
@@ -24,7 +25,7 @@ GREEN, BLUE, YELLOW, DIM, BOLD, RESET = (
     "\033[92m", "\033[94m", "\033[93m", "\033[2m", "\033[1m", "\033[0m"
 )
 CYAN = "\033[96m"
-INCOMPLETE_EXIT_CODE = 2
+INCOMPLETE_EXIT_CODE = 3
 
 
 # ─────────────────────────── helpers ────────────────────────────────────────
@@ -119,30 +120,43 @@ def _refined_locator_expr(target: dict) -> str | None:
         "get_by_test_id":     "getByTestId",
         "locator":            "locator",
     }
-    expr = raw
-    for py_name, js_name in snake_to_camel.items():
-        expr = expr.replace(py_name + "(", js_name + "(")
+    # Parse locator syntax, never execute model-supplied expressions. Quoted
+    # parentheses and escaped quotes are data, not call delimiters.
+    methods = {**snake_to_camel, **{v: v for v in snake_to_camel.values()},
+               "nth": "nth", "first": "first", "last": "last"}
 
-    # Convert Python args to JS: getByRole("combobox", name="Search", exact=True)
-    # -> getByRole('combobox', { name: 'Search', exact: true })
-    def _to_js_args(m):
-        inner = m.group(1)
-        kwargs = re.findall(r'(\w+)="([^"]*)"', inner)
-        bool_kwargs = re.findall(r'(\w+)=(True|False)', inner)
-        positional = re.findall(r'^"([^"]*)"', inner)
-        parts = []
-        if positional:
-            parts.append(q(positional[0]))
-        obj_bits = [f"{k}: {q(v)}" for k, v in kwargs]
-        obj_bits.extend(f"{k}: {v.lower()}" for k, v in bool_kwargs)
-        if obj_bits:
-            parts.append("{ " + ", ".join(obj_bits) + " }")
-        elif not positional:
-            parts.append(inner.replace('"', "'"))
-        return "(" + ", ".join(parts) + ")"
+    def literal(node):
+        value = ast.literal_eval(node)
+        if isinstance(value, str):
+            return q(value)
+        if value is None or isinstance(value, (bool, int, float)):
+            return json.dumps(value, allow_nan=False)
+        raise ValueError("Unsupported locator argument")
 
-    expr = re.sub(r'\(([^)]*)\)', _to_js_args, expr)
-    return f"page.{expr}"
+    def render(node):
+        if isinstance(node, ast.Name) and node.id == "page":
+            return "page"
+        if isinstance(node, ast.Attribute) and node.attr in {"first", "last"}:
+            return f"{render(node.value)}.{node.attr}()"
+        if not isinstance(node, ast.Call):
+            raise ValueError("Expected a locator call")
+        if isinstance(node.func, ast.Name):
+            owner, name = "page", node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            owner, name = render(node.func.value), node.func.attr
+        else:
+            raise ValueError("Unsupported locator call")
+        if name not in methods or any(k.arg is None for k in node.keywords):
+            raise ValueError("Unsupported locator method")
+        parts = [literal(arg) for arg in node.args]
+        if node.keywords:
+            parts.append("{ " + ", ".join(f"{k.arg}: {literal(k.value)}" for k in node.keywords) + " }")
+        return f"{owner}.{methods[name]}({', '.join(parts)})"
+
+    try:
+        return render(ast.parse(raw.strip(), mode="eval").body)
+    except (SyntaxError, ValueError, TypeError):
+        return None
 
 
 # ─────────────────── fallback (unrefined) locator ───────────────────────────
@@ -354,7 +368,7 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
                     return f"await expect({expr}.first()).toBeVisible();"
                 return f"await expect({expr}).toContainText({q(text)});"
             if "getByText" in expr and ".locator(" not in expr:
-                return f"await expect({expr}.first).toBeVisible();"
+                return f"await expect({expr}.first()).toBeVisible();"
             return f"await expect({expr}).toBeVisible();"
 
     # Fallback: heuristic locator — accessible name before guessed CSS

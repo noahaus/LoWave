@@ -165,7 +165,7 @@ def test_explicit_failed_grounding_without_notes_is_unresolved(tmp_path: Path) -
     assert ".click()" not in "\n".join(
         ln for ln in spec.splitlines() if not ln.lstrip().startswith("//")
     )
-    assert _cli(plan, out).returncode == 2
+    assert _cli(plan, out).returncode == 3
 
 
 def test_empty_workflow_is_incomplete_not_a_successful_noop(tmp_path: Path) -> None:
@@ -252,7 +252,7 @@ def test_default_cli_exit_is_nonzero_for_incomplete_output(tmp_path: Path) -> No
     result = _cli(plan, out)
 
     assert result.returncode != 0
-    assert result.returncode == 2
+    assert result.returncode == 3
     assert out.exists()
     assert "throw new Error" in out.read_text()
 
@@ -273,7 +273,7 @@ def test_empty_cli_exit_is_nonzero(tmp_path: Path) -> None:
 
     result = _cli(plan, out)
 
-    assert result.returncode == 2
+    assert result.returncode == 3
     assert "throw new Error" in out.read_text()
 
 
