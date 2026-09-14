@@ -276,6 +276,7 @@ select {
 .pill.done { border-color: var(--ok); color: var(--ok); }
 .pill.failed { border-color: var(--err); color: var(--err); }
 .pill.cancelled { border-color: var(--warn); color: var(--warn); }
+.pill.incomplete { border-color: var(--warn); color: var(--warn); }
 
 [hidden] { display: none !important; }
 

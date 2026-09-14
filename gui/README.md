@@ -48,3 +48,4 @@ The GUI window uses the same `pipeline-runner.js`. Launch with `npm run gui` (un
 - Existing root-level plans and specs are left untouched. This update does not migrate or delete them.
 - If the window fails to open in some agent environments, unset `ELECTRON_RUN_AS_NODE` (the `npm run gui` script already does this).
 - While a run is in progress, **Cancel** stops the current stage (`qa-parse` / refine / generate / Playwright) so you can start over.
+- Incomplete generation (unresolved required steps, including an empty workflow) is distinct from cancel and from runner/provider failure. The GUI marks the run incomplete / needs review, keeps the draft spec, does not start Playwright, and unlocks the controls. That draft is not a passed QA run.

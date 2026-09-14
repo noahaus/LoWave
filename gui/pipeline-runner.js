@@ -79,12 +79,35 @@ function stopChild(child) {
   }, 800);
 }
 
+const INCOMPLETE_EXIT_CODE = 2;
+
 function cancelledError(stdout = "", stderr = "") {
   const err = new Error("Pipeline cancelled");
   err.cancelled = true;
   err.stdout = stdout;
   err.stderr = stderr;
   return err;
+}
+
+function runEventFromError(err) {
+  if (err?.cancelled) {
+    return { type: "run", status: "cancelled", error: err.message };
+  }
+  if (err?.incomplete) {
+    return {
+      type: "run",
+      status: "incomplete",
+      error: err.message,
+      stderr: err.stderr || "",
+      result: err.result,
+    };
+  }
+  return {
+    type: "run",
+    status: "failed",
+    error: err?.message || "Failed",
+    stderr: err?.stderr || "",
+  };
 }
 
 function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {}) {
@@ -136,6 +159,7 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
       else {
         const err = new Error(`${path.basename(bin)} exited with code ${code}`);
         err.code = code;
+        err.exitCode = code;
         err.stdout = stdout;
         err.stderr = stderr;
         reject(err);
@@ -265,12 +289,21 @@ async function runPipeline(opts) {
     fs.mkdirSync(path.dirname(specPath), { recursive: true });
     emit("generate", "running", "plan → Playwright spec");
     const planIn = refine && fs.existsSync(refinedPlan) ? refinedPlan : actionPlan;
-    await runCommand(
-      resolveCli("qa-generate"),
-      [planIn, specPath, "--base-url", baseUrl],
-      { onLine: log, signal }
-    );
-    emit("generate", "done", specPath);
+    try {
+      await runCommand(
+        resolveCli("qa-generate"),
+        [planIn, specPath, "--base-url", baseUrl],
+        { onLine: log, signal }
+      );
+      emit("generate", "done", specPath);
+    } catch (err) {
+      if ((err.exitCode ?? err.code) === INCOMPLETE_EXIT_CODE) {
+        err.incomplete = true;
+        err.result = { specPath, incomplete: true };
+        emit("generate", "incomplete", specPath);
+      }
+      throw err;
+    }
   }
 
   throwIfCancelled();
@@ -291,4 +324,11 @@ async function runPipeline(opts) {
   return { actionPlan, refinedPlan, specPath };
 }
 
-module.exports = { runPipeline, REPO_ROOT, resolveCli };
+module.exports = {
+  runPipeline,
+  runCommand,
+  runEventFromError,
+  REPO_ROOT,
+  resolveCli,
+  INCOMPLETE_EXIT_CODE,
+};

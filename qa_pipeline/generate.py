@@ -8,8 +8,8 @@ Supports two input schemas:
 
 When a step carries a grounded refined locator it is emitted directly.
 Ungrounded or unrefined steps fall back to the original heuristic locator logic.
-Steps that failed refinement are emitted as commented-out TODO blocks so the
-spec still runs — skipping just the broken step — rather than failing to compile.
+Unresolved required steps stay in the spec as TODO/REVIEW comments so a draft
+remains inspectable, but the generated test fails before page actions.
 
     python -m qa_pipeline.generate refined_action_plan.json tests/generated.spec.ts
 """
@@ -24,6 +24,7 @@ GREEN, BLUE, YELLOW, DIM, BOLD, RESET = (
     "\033[92m", "\033[94m", "\033[93m", "\033[2m", "\033[1m", "\033[0m"
 )
 CYAN = "\033[96m"
+INCOMPLETE_EXIT_CODE = 2
 
 
 # ─────────────────────────── helpers ────────────────────────────────────────
@@ -44,6 +45,22 @@ def q(s) -> str:
 def _one_line(text) -> str:
     """Flatten text so a generated line comment cannot become executable code."""
     return " ".join(str("" if text is None else text).split())
+
+
+def _fmt_conf(conf) -> str:
+    """Format a refinement confidence for logs and comments without crashing."""
+    if isinstance(conf, bool) or not isinstance(conf, (int, float)):
+        return "n/a"
+    return f"{conf:.2f}"
+
+
+def _has_unresolved(line: str) -> bool:
+    """True when compiled output still contains a TODO or REVIEW comment."""
+    for ln in str(line).splitlines():
+        stripped = ln.strip()
+        if stripped.startswith("// TODO") or stripped.startswith("// REVIEW"):
+            return True
+    return False
 
 
 _SENTINELS = {"n/a", "n\\a", "na", "none", "null", "nil", "-", "--", "unknown", ""}
@@ -359,7 +376,10 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
     if text:
         return f"await expect(page.getByText({q(text)}, {{ exact: false }})).toBeVisible();"
 
-    return f"// TODO: assert step {num} has no locatable target — {step.get('description','')}"
+    return (
+        f"// TODO: assert step {num} has no locatable target — "
+        f"{_one_line(step.get('description', ''))}"
+    )
 
 
 # ─────────────────────────── step emitter ───────────────────────────────────
@@ -378,12 +398,13 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
     # Refined plan stores value at the top level; raw plan uses input_value
     value = step.get("value") or step.get("input_value")
 
-    # Steps that failed refinement get a prominent TODO comment
-    if refinement and not refinement.get("grounded") and refinement.get("notes"):
-        note = refinement["notes"]
+    # Explicit failed grounding is unresolved even when notes are absent.
+    # Raw plans with no refinement block still use heuristic locators.
+    if refinement and refinement.get("grounded") is False:
+        note = refinement.get("notes") or "explicit failed grounding"
         conf = refinement.get("confidence", 0)
         return (
-            f"// TODO (refinement failed, conf={conf:.2f}): {_one_line(note)}\n"
+            f"// TODO (refinement failed, conf={_fmt_conf(conf)}): {_one_line(note)}\n"
             f"  // action={action!r}  locator={target.get('playwright_locator')!r}  value={value!r}",
             True,
         )
@@ -395,16 +416,28 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
     if action in ("type", "select"):
         loc = locator(target, action, refinement)
         if loc is None:
-            return f"// TODO: step {num} has no locatable target — {step.get('description','')}", True
+            return (
+                f"// TODO: step {num} has no locatable target — "
+                f"{_one_line(step.get('description', ''))}",
+                True,
+            )
         if value is None:
-            return f"// TODO: step {num} ({action}) is missing value — {step.get('description','')}", True
+            return (
+                f"// TODO: step {num} ({action}) is missing value — "
+                f"{_one_line(step.get('description', ''))}",
+                True,
+            )
         verb = "fill" if action == "type" else "selectOption"
         return f"await {loc}.{verb}({q(value)});", False
 
     if action == "click":
         loc = locator(target, action, refinement)
         if loc is None:
-            return f"// TODO: step {num} click has no locatable target — {step.get('description','')}", True
+            return (
+                f"// TODO: step {num} click has no locatable target — "
+                f"{_one_line(step.get('description', ''))}",
+                True,
+            )
         return f"await {loc}.click();", False
 
     if action == "wait":
@@ -412,7 +445,7 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
 
     if action == "assert":
         line = emit_assert(step, refinement)
-        return line, line.startswith("// TODO")
+        return line, _has_unresolved(line)
 
     if action == "hover":
         loc = locator(target, action, refinement)
@@ -440,7 +473,11 @@ def emit_step(step: dict, base_url: str) -> tuple[str, bool]:
     if action == "terminate":
         return f"// Flow terminated intentionally at step {num}.", False
 
-    return f"// TODO: step {num} has unhandled action {action!r} — {step.get('description','')}", True
+    return (
+        f"// TODO: step {num} has unhandled action {action!r} — "
+        f"{_one_line(step.get('description', ''))}",
+        True,
+    )
 
 
 def _compile_step(step: dict, base_url: str) -> tuple[str, bool]:
@@ -455,7 +492,7 @@ def _compile_step(step: dict, base_url: str) -> tuple[str, bool]:
     ):
         note = f"// REVIEW: low-confidence grounding ({confidence:.2f}); verify this locator."
         return f"{note}\n  {line}", True
-    return line, needs_review
+    return line, needs_review or _has_unresolved(line)
 
 
 # ──────────────────────────── run ───────────────────────────────────────────
@@ -488,7 +525,7 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
     for s, line, is_todo in compiled:
         num    = s.get("step", "?")
         action = s.get("action", "?")
-        desc   = s.get("description", "")
+        desc   = _one_line(s.get("description", ""))
         ref    = s.get("refinement") or {}
         grounded = ref.get("grounded", False)
         conf     = ref.get("confidence")
@@ -500,9 +537,9 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
         source_tag = ""
         if is_refined:
             if grounded:
-                source_tag = f" {GREEN}[refined conf={conf:.2f}]{RESET}"
+                source_tag = f" {GREEN}[refined conf={_fmt_conf(conf)}]{RESET}"
             elif ref:
-                source_tag = f" {YELLOW}[ungrounded conf={conf:.2f}]{RESET}"
+                source_tag = f" {YELLOW}[ungrounded conf={_fmt_conf(conf)}]{RESET}"
             else:
                 source_tag = f" {DIM}[no refinement data]{RESET}"
         if reclassified:
@@ -513,11 +550,24 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
         for ln in line.splitlines():
             print(f"    {mark} {ln}")
 
-    # Assemble the TS spec
-    body = "\n".join(
-        f"  // Step {s.get('step')}: {s.get('description','')}\n  {line}"
-        for s, line, _ in compiled
-    )
+    if not steps:
+        warnings = 1
+
+    incomplete = warnings > 0
+    parts: list[str] = []
+    if incomplete:
+        if not steps:
+            reason = "Generated spec is incomplete: empty workflow has no compiled steps."
+        else:
+            reason = (
+                f"Generated spec is incomplete: {warnings} required step(s) were not compiled. "
+                "Inspect TODO/REVIEW comments; this is not a passing QA run."
+            )
+        parts.append(f"  throw new Error({q(reason)});")
+    for s, line, _ in compiled:
+        parts.append(f"  // Step {s.get('step')}: {_one_line(s.get('description', ''))}")
+        parts.append(f"  {line}")
+    body = "\n".join(parts)
     code = (
         "import { test, expect } from '@playwright/test';\n\n"
         f"test({q(title)}, async ({{ page }}) => {{\n"
@@ -530,6 +580,11 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
 
     print(f"\n{BOLD}━━━ Done ━━━{RESET}")
     print(f"  ✓ Written to {GREEN}{output_path}{RESET}")
+    if incomplete:
+        print(
+            f"  {YELLOW}⚠ Incomplete generation — the spec fails before page actions "
+            f"and is not a passing QA run{RESET}"
+        )
     if warnings:
         print(f"  {YELLOW}⚠ {warnings} step(s) emitted as TODO — review before running{RESET}")
 
@@ -552,9 +607,17 @@ def main() -> None:
                     help="Where to write the generated .spec.ts")
     ap.add_argument("--base-url", default=None,
                     help="Override the plan's base_url (default: plan value, then $QA_BASE_URL)")
+    ap.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Export an inspectable draft with exit 0 when required steps are unresolved. "
+             "The generated spec still fails before page actions.",
+    )
     args = ap.parse_args()
 
-    generate(Path(args.plan), Path(args.output), args.base_url)
+    warnings = generate(Path(args.plan), Path(args.output), args.base_url)
+    if warnings and not args.allow_incomplete:
+        raise SystemExit(INCOMPLETE_EXIT_CODE)
 
 
 if __name__ == "__main__":

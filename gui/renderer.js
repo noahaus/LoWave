@@ -1,18 +1,63 @@
 "use strict";
 
+function applyPipelineEvent(evt, ui) {
+  if (evt.type === "log") ui.appendLog(evt.line);
+  if (evt.type === "stage") {
+    ui.stageState[evt.stage] =
+      evt.status === "running" ? "running" : evt.status === "done" ? "done" : evt.status;
+    ui.renderPills();
+    const statusClass =
+      evt.status === "done" ? "ok" : evt.status === "incomplete" ? "warn" : "running";
+    ui.setStatus(`${evt.stage}: ${evt.status}`, statusClass);
+  }
+  if (evt.type !== "run") return;
+  if (evt.status === "started") {
+    ui.resetStages();
+    ui.renderPills();
+    ui.clearLog();
+    ui.setStatus("Running…", "running");
+    ui.setRunUi(true);
+  }
+  if (evt.status === "finished") {
+    ui.setStatus(`Done → ${evt.result?.specPath || "ok"}`, "ok");
+    ui.setRunUi(false);
+  }
+  if (evt.status === "cancelled") {
+    ui.markRunningStages("cancelled");
+    ui.renderPills();
+    ui.setStatus("Cancelled", "warn");
+    ui.appendLog("Pipeline cancelled.");
+    ui.setRunUi(false);
+  }
+  if (evt.status === "failed") {
+    ui.setStatus(evt.error || "Failed", "err");
+    if (evt.stderr) ui.appendLog(evt.stderr.slice(-3000));
+    ui.setRunUi(false);
+  }
+  if (evt.status === "incomplete") {
+    ui.markRunningStages("incomplete");
+    ui.renderPills();
+    ui.setStatus("Incomplete — needs review", "warn");
+    if (evt.error) ui.appendLog(evt.error);
+    if (evt.result?.specPath) ui.appendLog(`Draft spec: ${evt.result.specPath}`);
+    ui.setRunUi(false);
+  }
+}
+
+const inBrowser = typeof document !== "undefined";
 const $ = (id) => document.getElementById(id);
 
-const viewHome = $("view-home");
-const viewProject = $("view-project");
-const projectCards = $("projectCards");
-const stepsList = $("stepsList");
-const stepsPreview = $("stepsPreview");
-const logEl = $("log");
-const statusEl = $("status");
-const homeStatus = $("homeStatus");
-const stagePills = $("stagePills");
-const runBtn = $("runBtn");
-const cancelBtn = $("cancelBtn");
+const viewHome = inBrowser ? $("view-home") : null;
+const viewProject = inBrowser ? $("view-project") : null;
+const projectCards = inBrowser ? $("projectCards") : null;
+const stepsList = inBrowser ? $("stepsList") : null;
+const stepsPreview = inBrowser ? $("stepsPreview") : null;
+const logEl = inBrowser ? $("log") : null;
+const statusEl = inBrowser ? $("status") : null;
+const homeStatus = inBrowser ? $("homeStatus") : null;
+const stagePills = inBrowser ? $("stagePills") : null;
+const runBtn = inBrowser ? $("runBtn") : null;
+const cancelBtn = inBrowser ? $("cancelBtn") : null;
 
 const stageState = { parse: "idle", refine: "idle", generate: "idle", test: "idle" };
 
@@ -230,37 +275,20 @@ async function init() {
   });
 
   window.qaPipeline.onEvent((evt) => {
-    if (evt.type === "log") appendLog(evt.line);
-    if (evt.type === "stage") {
-      stageState[evt.stage] = evt.status === "running" ? "running" : evt.status === "done" ? "done" : evt.status;
-      renderPills();
-      setStatus(`${evt.stage}: ${evt.status}`, evt.status === "done" ? "ok" : "running");
-    }
-    if (evt.type === "run") {
-      if (evt.status === "started") {
+    applyPipelineEvent(evt, {
+      stageState,
+      renderPills,
+      setStatus,
+      setRunUi,
+      markRunningStages,
+      appendLog,
+      resetStages() {
         Object.keys(stageState).forEach((k) => (stageState[k] = "idle"));
-        renderPills();
+      },
+      clearLog() {
         logEl.textContent = "";
-        setStatus("Running…", "running");
-        setRunUi(true);
-      }
-      if (evt.status === "finished") {
-        setStatus(`Done → ${evt.result?.specPath || "ok"}`, "ok");
-        setRunUi(false);
-      }
-      if (evt.status === "cancelled") {
-        markRunningStages("cancelled");
-        renderPills();
-        setStatus("Cancelled", "warn");
-        appendLog("Pipeline cancelled.");
-        setRunUi(false);
-      }
-      if (evt.status === "failed") {
-        setStatus(evt.error || "Failed", "err");
-        if (evt.stderr) appendLog(evt.stderr.slice(-3000));
-        setRunUi(false);
-      }
-    }
+      },
+    });
   });
 
   runBtn.addEventListener("click", async () => {
@@ -305,7 +333,13 @@ async function init() {
   });
 }
 
-init().catch((err) => {
-  setHomeStatus(err.message || String(err), "err");
-  appendLog(String(err));
-});
+if (inBrowser) {
+  init().catch((err) => {
+    setHomeStatus(err.message || String(err), "err");
+    appendLog(String(err));
+  });
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { applyPipelineEvent };
+}
