@@ -1,4 +1,4 @@
-# Web App QA Pipeline
+# Web App QA Pipeline!
 
 Turn numbered English workflow steps into a runnable [Playwright](https://playwright.dev) test — automatically.
 
