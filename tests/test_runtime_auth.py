@@ -307,6 +307,54 @@ def test_short_passcodes_and_session_ids_are_scrubbed_without_scrubbing_user_ids
     assert redact_authenticated_text("code 1234 session SID5 Step 1", state) == "code session Step 1"
 
 
+def test_preferences_and_supabase_metadata_do_not_corrupt_page_copy():
+    state = {
+        "cookies": [
+            {"name": "theme", "value": "dark", "domain": "app.test", "path": "/"},
+            {"name": "sidebar_state", "value": "true", "domain": "app.test", "path": "/"},
+        ],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "sb-abc-auth-token",
+                "value": json.dumps({
+                    "access_token": "ACCESS_TOKEN_123",
+                    "provider": "email",
+                    "amr": [{"method": "password"}],
+                    "expires_in": 3600,
+                    "is_anonymous": False,
+                }),
+            }],
+        }],
+    }
+    text = "Toggle dark mode. Enter your email. Change password. True story. 3600 words. Plan is true. ACCESS_TOKEN_123"
+    assert redact_authenticated_text(text, state) == (
+        "Toggle dark mode. Enter your email. Change password. True story. 3600 words. Plan is true."
+    )
+
+
+def test_last_session_content_is_not_treated_as_authentication_state():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{"name": "lastSession", "value": '{"title":"Morning pages"}'}],
+        }],
+    }
+    assert redact_authenticated_text("Open Morning pages", state) == "Open Morning pages"
+
+
+def test_short_secret_fragments_are_removed_as_whole_values_only():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{"name": "sessionId", "value": "dark"}],
+        }],
+    }
+    assert redact_authenticated_text("dark darkness", state) == "darkness"
+
+
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):
     secret = "LEAK_SENTINEL_PYTHON_BRIDGE"
     hook = tmp_path / "hook.cjs"

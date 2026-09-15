@@ -372,7 +372,7 @@ _TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+|\b[A-Fa-f0-9]{
 def _secret_storage_context(key: Any) -> str | None:
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).strip("_").lower()
-    if re.search(r"(?:^|_)session$", normalized):
+    if normalized in {"session", "auth_session", "user_session"}:
         return "session"
     if re.search(
         r"(?:^|_)(?:access_token|refresh_token|id_token|auth_token|jwt_token|token|"
@@ -387,33 +387,60 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
     """Collect secret-bearing values, never storage keys or origin metadata."""
     fragments: set[str] = set()
 
-    def add_value(value: Any, *, secret_context: str | None = None) -> None:
+    def add_value(
+        value: Any,
+        *,
+        secret_context: str | None = None,
+        direct: bool = True,
+    ) -> None:
         if isinstance(value, str):
-            if secret_context in {"value", "session"} and len(value) >= 4:
-                fragments.add(value)
             try:
                 decoded = json.loads(value)
             except (TypeError, ValueError):
+                minimum = 4 if secret_context == "value" and direct else 6
+                if secret_context in {"value", "session"} and len(value) >= minimum:
+                    fragments.add(value)
                 return
-            add_value(decoded, secret_context=secret_context)
+
+            if isinstance(decoded, (dict, list)):
+                add_value(
+                    decoded,
+                    secret_context="session" if secret_context == "session" else None,
+                    direct=False,
+                )
+            elif secret_context == "value" and direct and len(value) >= 4:
+                fragments.add(value)
+            elif secret_context == "session" and direct and len(value) >= 6:
+                fragments.add(value)
         elif isinstance(value, dict):
             for key, child in value.items():
                 key_context = _secret_storage_context(key)
-                child_context = "value" if secret_context == "value" else (key_context or secret_context)
+                child_context = key_context or ("session" if secret_context == "session" else None)
                 add_value(
                     child,
                     secret_context=child_context,
+                    direct=key_context is not None,
                 )
         elif isinstance(value, list):
             for child in value:
-                add_value(child, secret_context=secret_context)
-        elif secret_context == "value" and value is not None:
+                add_value(
+                    child,
+                    secret_context="session" if secret_context == "session" else None,
+                    direct=False,
+                )
+        elif (
+            secret_context == "value"
+            and direct
+            and value is not None
+            and not isinstance(value, bool)
+        ):
             rendered = str(value)
             if len(rendered) >= 4:
                 fragments.add(rendered)
 
     for cookie in state.get("cookies", []):
-        add_value(cookie.get("value"), secret_context="value")
+        cookie_context = _secret_storage_context(cookie.get("name") or "")
+        add_value(cookie.get("value"), secret_context=cookie_context)
     for origin in state.get("origins", []):
         for item in origin.get("localStorage", []):
             add_value(
@@ -432,7 +459,11 @@ def redact_authenticated_text(value: str, state: dict) -> str:
     secrets = sorted(_secret_fragments_from_storage_state(state), key=len, reverse=True)
     cleaned = value
     for secret in secrets:
-        cleaned = cleaned.replace(secret, "")
+        cleaned = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(secret)}(?![A-Za-z0-9_])",
+            "",
+            cleaned,
+        )
     cleaned = _EMAIL_VALUE_RE.sub("", cleaned)
     cleaned = _TOKEN_VALUE_RE.sub("", cleaned)
     return " ".join(cleaned.split())
