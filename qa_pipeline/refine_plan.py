@@ -367,9 +367,16 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
 
 _EMAIL_VALUE_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9_-]{40,}\b")
-_SECRET_STORAGE_KEY_RE = re.compile(
-    r"(?i)(?:^|[_-])(access|refresh|id)?token(?:$|[_-])|password|passcode|secret|credential|authorization|session"
-)
+
+
+def _is_secret_storage_key(key: Any) -> bool:
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).strip("_").lower()
+    return bool(re.search(
+        r"(?:^|_)(?:access_token|refresh_token|id_token|auth_token|token|password|"
+        r"passcode|secret|credential|authorization|session|jwt)$",
+        normalized,
+    ))
 
 
 def _secret_fragments_from_storage_state(state: dict) -> set[str]:
@@ -389,13 +396,11 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
             for key, child in value.items():
                 add_value(
                     child,
-                    secret_field=secret_field or bool(_SECRET_STORAGE_KEY_RE.search(str(key))),
+                    secret_field=secret_field or _is_secret_storage_key(key),
                 )
         elif isinstance(value, list):
             for child in value:
                 add_value(child, secret_field=secret_field)
-        elif secret_field and value is not None:
-            fragments.add(str(value))
 
     for cookie in state.get("cookies", []):
         add_value(cookie.get("value"), secret_field=True)
@@ -403,7 +408,7 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
         for item in origin.get("localStorage", []):
             add_value(
                 item.get("value"),
-                secret_field=bool(_SECRET_STORAGE_KEY_RE.search(str(item.get("name") or ""))),
+                secret_field=_is_secret_storage_key(item.get("name") or ""),
             )
         for database in origin.get("indexedDB", []):
             for store in database.get("stores", []):

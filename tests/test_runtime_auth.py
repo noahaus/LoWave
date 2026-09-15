@@ -7,7 +7,7 @@ import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin, validate_storage_state
+from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin, validate_storage_state, _stop_process_tree
 from qa_pipeline.refine_plan import refine, redact_authenticated_dom, redact_authenticated_text
 from qa_pipeline import config
 from qa_pipeline import parse_steps
@@ -60,6 +60,23 @@ def test_python_accepts_chromium_ipv6_cookie_domain_form():
         {"cookies": [{"name": "sid", "value": "secret", "domain": "[::1]", "path": "/"}], "origins": []},
         "http://[::1]:3000",
     )["cookies"][0]["name"] == "sid"
+
+
+def test_windows_tree_cleanup_does_not_require_posix_signals(monkeypatch):
+    calls = []
+
+    class FakeProc:
+        pid = 4321
+        def poll(self): return None
+        def kill(self): pytest.fail("taskkill should handle the tree")
+        def terminate(self): pytest.fail("taskkill should handle the tree")
+
+    monkeypatch.setattr(
+        "qa_pipeline.runtime_auth.subprocess.run",
+        lambda args, **kwargs: calls.append((args, kwargs)),
+    )
+    _stop_process_tree(FakeProc(), force=True, platform_name="nt")
+    assert calls[0][0] == ["taskkill", "/PID", "4321", "/T", "/F"]
 
 
 def test_refine_rejects_auth_origin_override_before_model_or_browser():
@@ -244,6 +261,36 @@ def test_nested_value_inside_session_storage_is_scrubbed():
         }],
     }
     assert redact_authenticated_text("token ABCDEF123", state) == "token"
+
+
+def test_storage_redaction_ignores_normal_session_named_content_and_small_ids():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [
+                {"name": "sessionHistory", "value": '{"title":"Breathwork notes","id":1}'},
+                {"name": "lastSessionDraft", "value": "Step 1"},
+                {"name": "secretNotes", "value": "Visible journal text"},
+            ],
+        }],
+    }
+    text = "Breathwork notes, Step 1, Visible journal text"
+    assert redact_authenticated_text(text, state) == text
+
+
+def test_common_camel_case_token_and_jwt_keys_are_scrubbed():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "authCache",
+                "value": '{"authToken":"AUTH_TOKEN_123","jwt":"JWT_VALUE_456"}',
+            }],
+        }],
+    }
+    assert redact_authenticated_text("AUTH_TOKEN_123 JWT_VALUE_456", state) == ""
 
 
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):

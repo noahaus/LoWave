@@ -105,6 +105,20 @@ test("Node timeout settles when exited helper leaves descendant holding stdout",
   await assert.rejects(runAuthHook({ hookPath: hook, baseURL: "http://127.0.0.1:9", timeoutMs: 1000 }), /timed out|hook failed/);
 });
 
+test("Node timeout rejects even when a detached descendant keeps stdout open", { skip: process.platform === "win32", timeout: 3000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qa-auth-node-detached-"));
+  const hook = path.join(dir, "hook.cjs"); const pidFile = path.join(dir, "child.pid");
+  fs.writeFileSync(hook, `const {spawn}=require('node:child_process');const fs=require('node:fs');module.exports.authenticate=async()=>{const c=spawn('sh',['-c',"trap '' HUP TERM; while true; do sleep 1; done"],{detached:true,stdio:['ignore',process.stdout,process.stderr]});c.unref();fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));return new Promise(()=>{});};`);
+  t.after(() => {
+    if (!fs.existsSync(pidFile)) return;
+    try { process.kill(-Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL"); } catch {}
+  });
+  await assert.rejects(
+    runAuthHook({ hookPath: hook, baseURL: "http://127.0.0.1:9", timeoutMs: 200 }),
+    /timed out/,
+  );
+});
+
 test("Node helper kills a hook descendant after successful state transfer", { skip: process.platform === "win32", timeout: 10000 }, async (t) => {
   const server = http.createServer((_req, res) => res.end("ok"));
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve)); t.after(() => server.close());

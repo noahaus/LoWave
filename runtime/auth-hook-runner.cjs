@@ -70,15 +70,20 @@ function runAuthHook({ hookPath, baseURL, timeoutMs = 30000, maxBytes = 1024 * 1
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "ignore", "ipc"],
     });
-    let chunks = [], size = 0, settled = false, failure = null;
+    let chunks = [], size = 0, settled = false, timer;
     const parentExit = () => { if (child.pid && process.platform !== "win32") { try { process.kill(-child.pid, "SIGKILL"); } catch {} } };
     process.once("exit", parentExit);
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      process.removeListener("exit", parentExit);
+    };
     const fail = (message) => {
       if (settled) return;
-      settled = true; failure = new Error(message); stop(child);
+      settled = true; cleanup(); stop(child); reject(new Error(message));
     };
-    const timer = setTimeout(() => fail("runtime authentication timed out"), timeoutMs);
     const abort = () => fail("runtime authentication cancelled");
+    timer = setTimeout(() => fail("runtime authentication timed out"), timeoutMs);
     signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (chunk) => {
       size += chunk.length;
@@ -87,12 +92,10 @@ function runAuthHook({ hookPath, baseURL, timeoutMs = 30000, maxBytes = 1024 * 1
     });
     child.on("error", () => fail("runtime authentication helper failed"));
     child.on("close", (code) => {
-      clearTimeout(timer); signal?.removeEventListener("abort", abort);
-      process.removeListener("exit", parentExit);
+      cleanup();
       if (process.platform !== "win32" && child.pid) {
         try { process.kill(-child.pid, "SIGKILL"); } catch {}
       }
-      if (failure) return reject(failure);
       if (settled) return;
       settled = true;
       if (code !== 0) return reject(new Error("runtime authentication hook failed"));
