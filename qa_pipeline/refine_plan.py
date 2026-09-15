@@ -365,7 +365,7 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in out.items() if v not in (None, "", [])}
 
 
-_TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9_-]{40,}\b")
+_TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")
 
 
 def _secret_storage_context(key: Any, *, cookie: bool = False) -> str | None:
@@ -380,10 +380,17 @@ def _secret_storage_context(key: Any, *, cookie: bool = False) -> str | None:
         return "session"
     if re.search(
         r"(?:^|_)(?:access_token|refresh_token|id_token|auth_token|jwt_token|token|"
-        r"password|passcode|secret|credential|authorization|session_id|sid|api_key|jwt|email)$",
+        r"password|passcode|secret|credential|authorization|session_id|sid|api_key|jwt)$",
         normalized,
     ):
         return "value"
+    if (
+        normalized == "auth"
+        or normalized.startswith("auth_")
+        or normalized.endswith("_auth")
+        or "_auth_" in normalized
+    ):
+        return "auth"
     return None
 
 
@@ -402,17 +409,20 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
                 decoded = json.loads(value)
             except (TypeError, ValueError):
                 minimum = 4 if secret_context == "value" and direct else 6
-                if secret_context in {"value", "session"} and len(value) >= minimum:
+                if (
+                    secret_context in {"value", "session"}
+                    or secret_context == "auth" and direct
+                ) and len(value) >= minimum:
                     fragments.add(value)
                 return
 
             if isinstance(decoded, (dict, list)):
-                add_value(
-                    decoded,
-                    secret_context="session" if secret_context == "session" else None,
-                    direct=False,
-                )
-            elif secret_context == "value" and direct and len(value) >= 4:
+                add_value(decoded, secret_context=secret_context, direct=False)
+            elif isinstance(decoded, str):
+                minimum = 4 if secret_context in {"value", "auth"} else 6
+                if secret_context in {"value", "auth", "session"} and direct and len(decoded) >= minimum:
+                    fragments.add(decoded)
+            elif secret_context in {"value", "auth"} and direct and len(value) >= 4:
                 fragments.add(value)
             elif secret_context == "session" and direct and len(value) >= 6:
                 fragments.add(value)
@@ -421,8 +431,18 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
                 key_context = _secret_storage_context(key)
                 normalized_key = re.sub(r"[^a-zA-Z0-9]+", "_", str(key)).strip("_").lower()
                 child_context = key_context
-                if child_context is None and secret_context == "session" and normalized_key == "value":
+                if (
+                    child_context is None
+                    and secret_context in {"auth", "session"}
+                    and normalized_key in {"email", "username", "value"}
+                ):
                     child_context = "value"
+                elif (
+                    child_context is None
+                    and secret_context in {"auth", "session"}
+                    and isinstance(child, (dict, list))
+                ):
+                    child_context = secret_context
                 add_value(
                     child,
                     secret_context=child_context,
@@ -430,7 +450,7 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
                 )
         elif isinstance(value, list):
             for child in value:
-                add_value(child)
+                add_value(child, secret_context=secret_context, direct=True)
         elif (
             secret_context == "value"
             and direct
@@ -595,12 +615,17 @@ async def wait_for_app_page(
     if not reason:
         return
     log(f"  Bot-check / interstitial detected: {reason}", "WARN")
+    safe_url = (
+        redact_authenticated_text(page.url or "", authenticated_state)
+        if authenticated_state is not None
+        else page.url
+    )
     if headless:
         raise RuntimeError(
             "The site served a bot-check/captcha page instead of the app, so the "
             "target control is not in the DOM. Re-run refine headed (`--headed` or "
             "the GUI 'Show browser' option) and complete the check, then continue. "
-            f"URL: {page.url}"
+            f"URL: {safe_url}"
         )
     budget_s = 120
     log(f"  Complete the check in the visible browser. Waiting up to {budget_s}s…", "WARN")
@@ -612,7 +637,7 @@ async def wait_for_app_page(
             await wait_for_stable_page(page)
             return
     raise RuntimeError(
-        f"Still on a bot-check/captcha page after {budget_s}s. URL: {page.url}"
+        f"Still on a bot-check/captcha page after {budget_s}s. URL: {safe_url}"
     )
 
 

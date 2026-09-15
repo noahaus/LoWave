@@ -13,6 +13,7 @@ from qa_pipeline.refine_plan import (
     refine,
     redact_authenticated_dom,
     redact_authenticated_text,
+    wait_for_app_page,
 )
 from qa_pipeline import config
 from qa_pipeline import parse_steps
@@ -262,9 +263,19 @@ def test_authenticated_flash_text_is_scrubbed_before_logs_history_or_assertions(
 
 
 def test_ordinary_email_copy_is_preserved_when_it_is_not_in_auth_state():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "supportDirectory",
+                "value": '{"email":"support@example.com"}',
+            }],
+        }],
+    }
     assert redact_authenticated_text(
         "Invite support@example.com for help",
-        {"cookies": [], "origins": []},
+        state,
     ) == "Invite support@example.com for help"
 
 
@@ -301,6 +312,21 @@ def test_nested_value_inside_session_storage_is_scrubbed():
     assert redact_authenticated_text("token ABCDEF123", state) == "token"
 
 
+@pytest.mark.parametrize(
+    "stored_value",
+    ['"SESSION_SECRET_123"', '["SESSION_SECRET_123"]'],
+)
+def test_json_encoded_session_primitives_are_scrubbed(stored_value):
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{"name": "session", "value": stored_value}],
+        }],
+    }
+    assert redact_authenticated_text("Welcome SESSION_SECRET_123", state) == "Welcome"
+
+
 def test_storage_redaction_ignores_normal_session_named_content_and_small_ids():
     state = {
         "cookies": [],
@@ -329,6 +355,17 @@ def test_common_camel_case_token_and_jwt_keys_are_scrubbed():
         }],
     }
     assert redact_authenticated_text("AUTH_TOKEN_123 JWT_VALUE_456", state) == ""
+
+
+def test_opaque_value_under_an_auth_storage_key_is_scrubbed():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{"name": "authCache", "value": "OPAQUE_AUTH_SECRET"}],
+        }],
+    }
+    assert redact_authenticated_text("Welcome OPAQUE_AUTH_SECRET", state) == "Welcome"
 
 
 def test_short_passcodes_and_session_ids_are_scrubbed_without_scrubbing_user_ids():
@@ -417,6 +454,13 @@ def test_bearer_copy_is_preserved_but_long_bearer_credentials_are_scrubbed():
     ) == "The bearer shipped."
 
 
+def test_long_hashes_and_order_ids_are_preserved_when_not_in_auth_state():
+    build_hash = "0123456789abcdef0123456789abcdef"
+    order_id = "ORDER_REFERENCE_1234567890123456789012345"
+    text = f"Build {build_hash}. Order {order_id}."
+    assert redact_authenticated_text(text, {"cookies": [], "origins": []}) == text
+
+
 def test_firebase_indexeddb_secret_is_scrubbed_without_scrubbing_ordinary_records():
     state = {
         "cookies": [],
@@ -467,6 +511,24 @@ def test_block_page_diagnostic_redacts_authenticated_values():
     reason = asyncio.run(describe_block_page(Page(), authenticated_state=state))
     assert reason is not None
     assert "SESSION_SECRET_123" not in reason
+
+
+def test_block_page_error_never_reintroduces_a_secret_from_the_url():
+    class Page:
+        url = "https://app.test/captcha?token=SESSION_SECRET_123"
+
+    state = {
+        "cookies": [{
+            "name": "sessionid",
+            "value": "SESSION_SECRET_123",
+            "domain": "app.test",
+            "path": "/",
+        }],
+        "origins": [],
+    }
+    with pytest.raises(RuntimeError) as captured:
+        asyncio.run(wait_for_app_page(Page(), headless=True, authenticated_state=state))
+    assert "SESSION_SECRET_123" not in str(captured.value)
 
 
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):
