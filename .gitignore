@@ -28,6 +28,8 @@ node_modules/
 # Committed reference copies live in examples/ instead.
 /action_plan.json
 /refined_action_plan.json
+/.qa-pipeline/
+/tests/generated/
 
 # ── Large media (use Git LFS if you need to track these) ─
 *.mp4

@@ -3,7 +3,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const fs = require("fs");
 const path = require("path");
-const { runPipeline, REPO_ROOT } = require("./pipeline-runner");
+const { runPipeline, runEventFromError, REPO_ROOT } = require("./pipeline-runner");
 const { createProjectStore } = require("./project-store");
 
 if (!app || !ipcMain) {
@@ -59,16 +59,13 @@ async function executePipeline(opts) {
     send("pipeline:event", { type: "run", status: "finished", result });
     return result;
   } catch (err) {
+    send("pipeline:event", runEventFromError(err));
     if (err.cancelled) {
-      send("pipeline:event", { type: "run", status: "cancelled", error: err.message });
       return { cancelled: true };
     }
-    send("pipeline:event", {
-      type: "run",
-      status: "failed",
-      error: err.message,
-      stderr: err.stderr || "",
-    });
+    if (err.incomplete) {
+      return { incomplete: true, specPath: err.result?.specPath };
+    }
     throw err;
   } finally {
     running = false;

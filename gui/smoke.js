@@ -31,7 +31,7 @@ const stepsPath =
       stepsPath,
       baseUrl: process.env.QA_BASE_URL || "http://localhost:3000",
       backend: process.env.LLM_BACKEND || "ollama",
-      model: process.env.QA_MODEL || "qwen3-coder:30b",
+      model: process.env.QA_MODEL,
       parse: stages.includes("parse"),
       refine: stages.includes("refine"),
       generate: stages.includes("generate"),

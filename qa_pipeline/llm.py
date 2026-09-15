@@ -5,9 +5,24 @@ Imports are lazy so only the backend you actually use needs to be installed
 """
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Optional
 
 from qa_pipeline import config
+
+
+def _load_optional_model(backend: str, module_name: str, class_name: str):
+    """Load a provider adapter or explain the exact extra the user needs."""
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name:
+            raise
+        raise RuntimeError(
+            f"The {backend} backend is not installed. "
+            f'Run `pip install -e ".[{backend}]"` in this repository.'
+        ) from exc
+    return getattr(module, class_name)
 
 
 def build_llm(
@@ -27,8 +42,26 @@ def build_llm(
     """
     resolved = model or config.DEFAULT_MODELS.get(backend)
 
+    if backend == "claude-cli":
+        from qa_pipeline.cli_chat import ClaudeCLIChat
+
+        return ClaudeCLIChat(
+            model=resolved,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    if backend == "codex-cli":
+        from qa_pipeline.cli_chat import CodexCLIChat
+
+        return CodexCLIChat(
+            model=resolved,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     if backend == "ollama":
-        from langchain_ollama import ChatOllama  # local, free, weaker on dense UI
+        ChatOllama = _load_optional_model(
+            "ollama", "langchain_ollama", "ChatOllama"
+        )
         return ChatOllama(
             model=resolved,
             temperature=temperature,
@@ -36,20 +69,26 @@ def build_llm(
             num_ctx=64000,
         )
     if backend == "anthropic":
-        from langchain_anthropic import ChatAnthropic  # strong on screenshots
+        ChatAnthropic = _load_optional_model(
+            "anthropic", "langchain_anthropic", "ChatAnthropic"
+        )
         return ChatAnthropic(
             model=resolved,
             temperature=temperature,
             max_tokens=max_tokens or 8000,
         )
     if backend == "openai":
-        from langchain_openai import ChatOpenAI
+        ChatOpenAI = _load_optional_model(
+            "openai", "langchain_openai", "ChatOpenAI"
+        )
         kwargs = {"model": resolved, "temperature": temperature}
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         return ChatOpenAI(**kwargs)
     if backend == "google":
-        from langchain_google_genai import ChatGoogleGenerativeAI
+        ChatGoogleGenerativeAI = _load_optional_model(
+            "google", "langchain_google_genai", "ChatGoogleGenerativeAI"
+        )
         return ChatGoogleGenerativeAI(model=resolved, temperature=temperature)
 
     raise SystemExit(

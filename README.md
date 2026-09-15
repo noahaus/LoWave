@@ -25,7 +25,7 @@ Everything app-specific — the URL under test, login credentials, LLM provider 
 
 - **Python 3.10+**
 - **Node.js 18+** (for Playwright)
-- An **LLM backend**: an API key for Anthropic / OpenAI / Google, *or* a local [Ollama](https://ollama.com) install.
+- An **LLM backend**: an API key for Anthropic / OpenAI / Google, a local [Ollama](https://ollama.com) install, or a signed-in Claude Code / Codex CLI.
 
 ## Install
 
@@ -50,9 +50,62 @@ Copy `.env.example` to `.env` and set what you need. Every value also has a matc
 |----------|---------|---------|
 | `QA_BASE_URL` | URL of the app under test | `http://localhost:3000` |
 | `QA_USERNAME` / `QA_PASSWORD` | Login for workflows with a sign-in step (optional) | read from the steps file |
-| `LLM_BACKEND` | `anthropic` \| `openai` \| `google` \| `ollama` | `anthropic` |
+| `LLM_BACKEND` | `anthropic` \| `openai` \| `google` \| `ollama` \| `claude-cli` \| `codex-cli` | `anthropic` |
 | `QA_MODEL` | Pin a specific model (optional) | per-backend default |
 | `ANTHROPIC_API_KEY` etc. | Credentials for your chosen backend | — |
+
+### Use an existing Claude Code or Codex subscription
+
+The optional CLI backends run through a provider CLI that is already installed
+and signed in on the machine. Prompts travel over stdin and Codex runs with a
+read-only filesystem sandbox.
+
+```bash
+# Claude Code subscription
+claude auth status
+LLM_BACKEND=claude-cli qa-parse steps.txt action_plan.json
+
+# ChatGPT / Codex subscription
+codex login status
+LLM_BACKEND=codex-cli qa-parse steps.txt action_plan.json
+```
+
+Leave `QA_MODEL` and the GUI's Model field blank to use the selected CLI's
+configured default. These backends are optional because provider subscription
+terms can differ from API terms; confirm the intended use before presenting
+subscription access as a supported commercial integration.
+
+### Test a signed-in workflow without saving credentials
+
+For apps that need a real session, refinement and generated tests can use a
+trusted local authentication hook. The hook signs in at run time and returns
+Playwright browser state through a local pipe. Credentials stay out of the
+steps file, model prompt, saved plan, generated spec, command arguments, and
+pipeline logs.
+
+```js
+// auth-hook.cjs. Keep this local and out of Git.
+module.exports.authenticate = async ({ page, baseURL }) => {
+  // Resolve credentials from your normal secret store or test environment.
+  await page.goto(new URL('/login', baseURL).href);
+  await page.getByLabel('Email').fill(process.env.QA_TEST_EMAIL);
+  await page.getByLabel('Password').fill(process.env.QA_TEST_PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+};
+```
+
+```bash
+qa-parse steps.txt action_plan.json --runtime-auth
+qa-refine --plan action_plan.json --out refined_action_plan.json \
+  --auth-hook "$PWD/auth-hook.cjs"
+qa-generate refined_action_plan.json tests/generated.spec.ts --runtime-auth
+QA_AUTH_HOOK="$PWD/auth-hook.cjs" npx playwright test tests/generated.spec.ts
+```
+
+Hooks are executable local code with the same access as the QA process, so use
+only a hook you trust. The first implementation accepts session state only for
+the app's exact HTTP(S) origin and requires a source or editable checkout. See
+`runtime/README.md` for the boundary and current limitations.
 
 ---
 
@@ -141,10 +194,12 @@ The steps LLM cannot see the DOM, so its selectors are guesses. `qa-refine` open
 .
 ├── qa_pipeline/            # the Python tool
 │   ├── config.py           # env/CLI settings resolution
+│   ├── cli_chat.py         # optional Claude Code / Codex subscription wrappers
 │   ├── llm.py              # shared LangChain model factory
 │   ├── parse_steps.py      # stage 1: steps.txt → action_plan.json
 │   ├── refine_plan.py      # stage 2: ground plan on live DOM
 │   └── generate.py         # stage 3: plan → Playwright spec
+├── runtime/                # opt-in memory-only authentication bridge
 ├── demo_app/               # self-contained fixture apps (Kestrel)
 │   ├── index.html          # expense reports (has login)
 │   └── calendar.html       # calendar (no login)
@@ -192,7 +247,7 @@ See `examples/` for full samples.
 - **Schema/JSON errors from stage 1** — the model returned prose; try a stronger model via `--model`, or tighten the wording of ambiguous steps.
 - **No numbered steps found** — each instruction must start with `1.` / `2)` style numbering.
 - **`qa-refine` can't reach the app** — confirm it's actually serving at `QA_BASE_URL`.
-- **TODO comments in the generated spec** — a step couldn't be grounded; check `metadata.known_ambiguities` and refine or edit the plan.
+- **TODO comments in the generated spec** — a required step couldn't be compiled. The spec is still written for inspection, but `qa-generate` exits 3 and the generated test throws before page actions so Playwright cannot pass the remaining steps. Exit 2 remains a command usage error. Use `--allow-incomplete` only to export that draft with exit 0; the runtime guard stays. Check `metadata.known_ambiguities` and refine or edit the plan. An empty workflow is incomplete. An intentional `terminate` step is a complete, explicit stop.
 
 ## License
 

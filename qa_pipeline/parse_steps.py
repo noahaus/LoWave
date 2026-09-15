@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from qa_pipeline import config
+from qa_pipeline.runtime_auth import canonical_origin
 from qa_pipeline.llm import build_llm
 
 GREEN, BLUE, YELLOW, DIM, BOLD, RESET = (
@@ -211,7 +212,7 @@ def main():
     ap.add_argument("steps", type=Path, help="Path to a .txt file of numbered instructions")
     ap.add_argument("output", type=Path, nargs="?", default=Path("action_plan.json"))
     ap.add_argument("--backend", default=None,
-                    choices=["ollama", "anthropic", "openai", "google"],
+                    choices=config.BACKENDS,
                     help="LLM provider (default: $LLM_BACKEND or anthropic)")
     ap.add_argument("--model", default=None, help="override the backend's default model")
     ap.add_argument("--temperature", type=float, default=0.0)
@@ -221,12 +222,27 @@ def main():
                     help="login username for the workflow (default: $QA_USERNAME)")
     ap.add_argument("--password", default=None,
                     help="login password for the workflow (default: $QA_PASSWORD)")
+    ap.add_argument(
+        "--runtime-auth",
+        action="store_true",
+        help="exclude legacy credentials from the model prompt and saved plan",
+    )
     args = ap.parse_args()
 
     backend = config.backend(args.backend)
     base_url = config.base_url(args.base_url)
-    username = config.username(args.username)
-    password = config.password(args.password)
+    if args.runtime_auth:
+        try:
+            canonical_origin(base_url)
+        except ValueError:
+            ap.error("--runtime-auth requires an HTTP(S) URL without embedded credentials")
+        if args.username is not None or args.password is not None:
+            ap.error("--runtime-auth cannot be combined with --username or --password")
+        username = None
+        password = None
+    else:
+        username = config.username(args.username)
+        password = config.password(args.password)
 
     if not args.steps.exists():
         sys.exit(f"{YELLOW}ERROR: steps file not found at {args.steps}{RESET}")

@@ -40,9 +40,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+from pathlib import Path
 import json
 import re
 from typing import Any, Literal, Optional
+from urllib.parse import unquote
 
 from pydantic import BaseModel, Field
 from playwright.async_api import async_playwright, expect, Page, Locator, Error as PlaywrightError
@@ -53,6 +56,7 @@ from datetime import datetime
 
 from qa_pipeline import config
 from qa_pipeline.llm import build_llm
+from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin
 
 
 def log(msg: str, level: str = "INFO") -> None:
@@ -82,6 +86,7 @@ class FuzzyStep(BaseModel):
     target: str                       # free-text description (+ unverified hint)
     value: Optional[str] = None
     expected_result: Optional[str] = None
+    expected_outcome: dict[str, Any] = Field(default_factory=dict)
     original_selector: Optional[str] = None
 
 
@@ -94,6 +99,7 @@ class RefinedStep(BaseModel):
     locator_value: str = Field(description="Accessible name / label / test id / text / css selector.")
     role_name: Optional[str] = Field(default=None, description="ARIA role when strategy=='role'.")
     host_tag: Optional[str] = Field(default=None, description="Matched element's tag; used to scope text locators.")
+    title_only_name: Optional[str] = Field(default=None, description="Accessible name supplied only by title, with no rendered text.")
     value: Optional[str] = None
     expected_result: str
     confidence: float = Field(ge=0.0, le=1.0)
@@ -108,6 +114,9 @@ class RefinedStep(BaseModel):
 
 _EXTRACT_JS = r"""
 () => {
+  // Handles are valid only for one snapshot. Dynamic UIs can make a previously
+  // indexed element ineligible, so clear every old marker before reindexing.
+  document.querySelectorAll('[data-ai-index]').forEach((el) => el.removeAttribute('data-ai-index'));
   const SEMANTIC = 'a,button,input,select,textarea,summary,[role],[onclick],[tabindex]:not([tabindex="-1"]),h1,h2,h3,h4,h5,h6,[data-testid],[data-test-id],[class*="badge"],[jsaction],[contenteditable="true"]';
   const POINTER_TAGS = 'div,span,li,td,th,p,label,section,article,header,nav,em,strong,i,b';
   const isVisible = (el) => {
@@ -190,7 +199,7 @@ _EXTRACT_JS = r"""
     el.setAttribute('data-ai-index', String(i));   // ephemeral handle for THIS snapshot
     const r = el.getBoundingClientRect();
     const label = el.getAttribute('aria-label') ||
-                  (el.labels && el.labels[0] && el.labels[0].innerText) || null;
+                  (el.labels && el.labels[0] && el.labels[0].textContent) || null;
     const tag = el.tagName.toLowerCase();
     const explicitRole = el.getAttribute('role');
     const implicitRole = explicitRole || (
@@ -205,7 +214,9 @@ _EXTRACT_JS = r"""
       (tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' || tag === 'h5' || tag === 'h6') ? 'heading' :
       null
     );
-    const rawText = (el.innerText || el.value || '').trim();
+    // Playwright accessible-name and text locators match source text, while
+    // innerText includes CSS transformations such as text-transform: uppercase.
+    const rawText = (el.textContent || el.value || '').trim();
     const firstLine = rawText.split(/\n/).map(s => s.trim()).filter(Boolean)[0] || rawText;
     return {
       index: i,
@@ -216,9 +227,19 @@ _EXTRACT_JS = r"""
       text: firstLine.slice(0, 80),
       label: label,
       placeholder: el.getAttribute('placeholder'),
+      title: el.getAttribute('title'),
       name: el.getAttribute('name'),
       id: el.id || null,
       testid: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || null,
+      icon: (() => {
+        const svg = el.querySelector('svg[data-lucide], svg.lucide');
+        if (!svg) return null;
+        if (svg.dataset?.lucide) return svg.dataset.lucide;
+        const iconClass = Array.from(svg.classList).find(
+          cls => cls.startsWith('lucide-') && cls !== 'lucide-icon'
+        );
+        return iconClass ? iconClass.slice('lucide-'.length) : null;
+      })(),
       bg: window.getComputedStyle(el).backgroundColor,   // helps match "blue button"
       box: {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)},
     };
@@ -249,7 +270,7 @@ _ELEMENT_ACTIONS = {"click", "type", "select", "hover", "assert", "drag"}
 def _element_search_blob(el: dict[str, Any]) -> str:
     return " ".join(
         str(el.get(k) or "")
-        for k in ("text", "label", "placeholder", "name", "testid", "id")
+        for k in ("text", "label", "placeholder", "title", "name", "testid", "id", "icon")
     )
 
 
@@ -336,7 +357,7 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
     role = el.get("role")
     if role and role not in {"none", "presentation"}:
         out["role"] = role
-    for key in ("type", "text", "label", "placeholder", "name", "testid", "id"):
+    for key in ("type", "text", "label", "placeholder", "title", "name", "testid", "id", "icon"):
         val = el.get(key)
         if val:
             out[key] = val[:80] if isinstance(val, str) else val
@@ -344,6 +365,220 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
     if box:
         out["xy"] = [box.get("x"), box.get("y")]
     return {k: v for k, v in out.items() if v not in (None, "", [])}
+
+
+_TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")
+
+
+def _secret_storage_context(key: Any, *, cookie: bool = False) -> str | None:
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).strip("_").lower()
+    if normalized in {"session", "auth_session", "user_session"}:
+        return "session"
+    if cookie and (
+        normalized in {"sess", "sessionid", "phpsessid", "jsessionid", "asp_net_sessionid"}
+        or normalized.endswith("_session")
+        or normalized.endswith("_sess")
+        or re.search(r"(?:^|_)(?:auth|token|jwt|csrf|clearance)(?:_|$)", normalized)
+    ):
+        return "session"
+    if re.search(
+        r"(?:^|_)(?:access_token|refresh_token|id_token|auth_token|jwt_token|token|"
+        r"password|passcode|secret|credential|authorization|session_id|sid|api_key|jwt)$",
+        normalized,
+    ):
+        return "value"
+    if (
+        normalized in {"auth", "auth_cache", "auth_state", "authentication", "authentication_cache"}
+        or normalized.endswith("_auth_cache")
+        or normalized.endswith("_auth_state")
+        or re.search(r"(?:^|_)auth_user(?:_|$)", normalized)
+    ):
+        return "auth"
+    return None
+
+
+def _secret_fragments_from_storage_state(state: dict) -> set[str]:
+    """Collect secret-bearing values, never storage keys or origin metadata."""
+    fragments: set[str] = set()
+
+    def add_value(
+        value: Any,
+        *,
+        secret_context: str | None = None,
+        direct: bool = True,
+    ) -> None:
+        if isinstance(value, str):
+            unquoted_value = unquote(value)
+            if unquoted_value != value:
+                add_value(
+                    unquoted_value,
+                    secret_context=secret_context,
+                    direct=direct,
+                )
+            if value.startswith("base64-"):
+                encoded = value.removeprefix("base64-")
+                try:
+                    padding = "=" * (-len(encoded) % 4)
+                    decoded_value = base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    pass
+                else:
+                    add_value(
+                        decoded_value,
+                        secret_context=secret_context,
+                        direct=direct,
+                    )
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError):
+                minimum = 4 if secret_context == "value" and direct else 6
+                if (
+                    secret_context in {"value", "session"}
+                    or secret_context == "auth" and direct
+                ) and len(value) >= minimum:
+                    fragments.add(value)
+                return
+
+            if isinstance(decoded, (dict, list)):
+                add_value(
+                    decoded,
+                    secret_context=secret_context,
+                    direct=isinstance(decoded, list) and direct,
+                )
+            elif isinstance(decoded, str):
+                minimum = 4 if secret_context in {"value", "auth"} else 6
+                if secret_context in {"value", "auth", "session"} and direct and len(decoded) >= minimum:
+                    fragments.add(decoded)
+            elif secret_context in {"value", "auth"} and direct and len(value) >= 4:
+                fragments.add(value)
+            elif secret_context == "session" and direct and len(value) >= 6:
+                fragments.add(value)
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                key_context = _secret_storage_context(key)
+                normalized_key = re.sub(r"[^a-zA-Z0-9]+", "_", str(key)).strip("_").lower()
+                child_context = key_context
+                child_direct = key_context is not None
+                if (
+                    child_context is None
+                    and secret_context in {"auth", "session"}
+                    and normalized_key in {"email", "username", "value"}
+                ):
+                    child_context = "value"
+                    child_direct = True
+                elif (
+                    child_context is None
+                    and secret_context in {"auth", "session"}
+                    and isinstance(child, (dict, list))
+                ):
+                    child_context = secret_context
+                    child_direct = False
+                add_value(
+                    child,
+                    secret_context=child_context,
+                    direct=child_direct,
+                )
+        elif isinstance(value, list):
+            for child in value:
+                add_value(
+                    child,
+                    secret_context=secret_context if direct else None,
+                    direct=True,
+                )
+        elif (
+            secret_context == "value"
+            and direct
+            and value is not None
+            and not isinstance(value, bool)
+        ):
+            rendered = str(value)
+            if len(rendered) >= 4:
+                fragments.add(rendered)
+
+    cookie_chunks: dict[str, list[tuple[int, str]]] = {}
+    for cookie in state.get("cookies", []):
+        cookie_name = str(cookie.get("name") or "")
+        cookie_context = _secret_storage_context(cookie_name, cookie=True)
+        add_value(cookie.get("value"), secret_context=cookie_context)
+        chunk = re.match(r"^(.*?)[._-](\d+)$", cookie_name)
+        if chunk and cookie_context is not None and isinstance(cookie.get("value"), str):
+            cookie_chunks.setdefault(chunk.group(1), []).append(
+                (int(chunk.group(2)), cookie["value"])
+            )
+    for chunks in cookie_chunks.values():
+        if len(chunks) > 1:
+            add_value(
+                "".join(value for _, value in sorted(chunks)),
+                secret_context="session",
+            )
+    for origin in state.get("origins", []):
+        for item in origin.get("localStorage", []):
+            add_value(
+                item.get("value"),
+                secret_context=_secret_storage_context(item.get("name") or ""),
+            )
+        for database in origin.get("indexedDB", []):
+            for store in database.get("stores", []):
+                for record in store.get("records", []):
+                    identity = "_".join(str(part or "") for part in (
+                        database.get("name"),
+                        store.get("name"),
+                        record.get("key"),
+                    ))
+                    normalized_identity = re.sub(
+                        r"([a-z0-9])([A-Z])", r"\1_\2", identity
+                    )
+                    normalized_identity = re.sub(
+                        r"[^a-zA-Z0-9]+", "_", normalized_identity
+                    ).strip("_").lower()
+                    indexed_context = (
+                        "session"
+                        if (
+                            "firebase_local_storage" in normalized_identity
+                            or re.search(r"(?:^|_)(?:auth|authentication)(?:_|$)", normalized_identity)
+                            or _secret_storage_context(identity) is not None
+                        )
+                        else None
+                    )
+                    add_value(record.get("value"), secret_context=indexed_context)
+    return fragments
+
+
+def redact_authenticated_text(value: str, state: dict) -> str:
+    """Remove session secrets and credential-shaped values from runtime text."""
+    secrets = sorted(_secret_fragments_from_storage_state(state), key=len, reverse=True)
+    cleaned = value
+    for secret in secrets:
+        cleaned = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(secret)}(?![A-Za-z0-9_])",
+            "",
+            cleaned,
+        )
+    cleaned = _TOKEN_VALUE_RE.sub("", cleaned)
+    return " ".join(cleaned.split())
+
+
+def redact_authenticated_url(value: str, state: dict) -> str:
+    """Make diagnostic URLs safe even when a secret is percent-encoded."""
+    return redact_authenticated_text(unquote(value), state)
+
+
+def redact_authenticated_dom(elements: list[dict[str, Any]], state: dict) -> list[dict[str, Any]]:
+    """Remove signed-in values before snapshots reach logs, models, or plans."""
+
+    safe: list[dict[str, Any]] = []
+    for source in elements:
+        item = {
+            key: redact_authenticated_text(value, state) if isinstance(value, str) else value
+            for key, value in source.items()
+        }
+        tag = str(item.get("tag") or "").lower()
+        input_type = str(item.get("type") or "").lower()
+        if tag in {"input", "textarea", "select"} and input_type not in {"button", "submit", "reset"}:
+            item["text"] = ""
+        safe.append(item)
+    return safe
 
 
 def select_dom_for_llm(
@@ -397,45 +632,65 @@ def _is_too_large_request(exc: BaseException) -> bool:
     )
 
 
-async def describe_block_page(page: Page) -> Optional[str]:
+async def describe_block_page(
+    page: Page,
+    authenticated_state: dict | None = None,
+) -> Optional[str]:
     """Return a reason if the tab is a captcha/interstitial instead of the app."""
     url = page.url or ""
+    safe_url = (
+        redact_authenticated_url(url, authenticated_state)
+        if authenticated_state is not None
+        else url
+    )
     if _BLOCK_URL_RE.search(url):
-        return f"block URL {url}"
+        return f"block URL {safe_url}"
     try:
         text = await page.inner_text("body", timeout=2000)
     except Exception:
         return None
     if text and _BLOCK_TEXT_RE.search(text):
         snippet = " ".join(text.split())[:120]
-        return f"bot-check copy on {url}: {snippet!r}"
+        if authenticated_state is not None:
+            snippet = redact_authenticated_text(snippet, authenticated_state)
+        return f"bot-check copy on {safe_url}: {snippet!r}"
     return None
 
 
-async def wait_for_app_page(page: Page, *, headless: bool) -> None:
+async def wait_for_app_page(
+    page: Page,
+    *,
+    headless: bool,
+    authenticated_state: dict | None = None,
+) -> None:
     """Fail fast (headless) or wait for the user (headed) when a bot-check is showing."""
-    reason = await describe_block_page(page)
+    reason = await describe_block_page(page, authenticated_state)
     if not reason:
         return
     log(f"  Bot-check / interstitial detected: {reason}", "WARN")
+    safe_url = (
+        redact_authenticated_url(page.url or "", authenticated_state)
+        if authenticated_state is not None
+        else page.url
+    )
     if headless:
         raise RuntimeError(
             "The site served a bot-check/captcha page instead of the app, so the "
             "target control is not in the DOM. Re-run refine headed (`--headed` or "
             "the GUI 'Show browser' option) and complete the check, then continue. "
-            f"URL: {page.url}"
+            f"URL: {safe_url}"
         )
     budget_s = 120
     log(f"  Complete the check in the visible browser. Waiting up to {budget_s}s…", "WARN")
     for _ in range(budget_s // 2):
         await page.wait_for_timeout(2000)
-        reason = await describe_block_page(page)
+        reason = await describe_block_page(page, authenticated_state)
         if not reason:
             log("  Interstitial cleared — continuing", "OK")
             await wait_for_stable_page(page)
             return
     raise RuntimeError(
-        f"Still on a bot-check/captcha page after {budget_s}s. URL: {page.url}"
+        f"Still on a bot-check/captcha page after {budget_s}s. URL: {safe_url}"
     )
 
 
@@ -456,7 +711,15 @@ def grounding_matches_dom(step: RefinedStep, dom: list[dict[str, Any]]) -> bool:
     if step.action not in {"click", "type", "select", "hover", "drag"}:
         return True
     if step.element_index is not None:
-        return any(el.get("index") == step.element_index for el in dom)
+        matched = next((el for el in dom if el.get("index") == step.element_index), None)
+        if not matched:
+            return False
+        if step.locator_strategy == "css":
+            selector = (step.locator_value or "").strip().lower()
+            tag = (matched.get("tag") or "").strip().lower()
+            if selector == tag and sum((el.get("tag") or "").lower() == tag for el in dom) > 1:
+                return False
+        return True
     needle = (step.locator_value or "").strip()
     if not needle or needle.lower() == "n/a":
         return False
@@ -467,7 +730,7 @@ def grounding_matches_dom(step: RefinedStep, dom: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def launch_browser_page(p, *, headless: bool):
+async def launch_browser_page(p, *, headless: bool, storage_state: dict | None = None):
     """Launch Chromium in a realistic context so sites are less likely to serve a bot wall."""
     args = ["--disable-blink-features=AutomationControlled"]
     browser = None
@@ -481,6 +744,7 @@ async def launch_browser_page(p, *, headless: bool):
     context = await browser.new_context(
         viewport={"width": 1280, "height": 800},
         locale="en-US",
+        storage_state=storage_state,
     )
     await context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
@@ -506,7 +770,12 @@ async def wait_for_stable_page(page: Page, *, timeout_ms: int = 15000) -> None:
     await page.wait_for_timeout(150)
 
 
-async def wait_for_ui_settle(page: Page, *, watch_flash: bool = False) -> Optional[str]:
+async def wait_for_ui_settle(
+    page: Page,
+    *,
+    watch_flash: bool = False,
+    authenticated_state: dict | None = None,
+) -> Optional[str]:
     """After a click/submit, wait out save spinners and capture a toast/status.
 
     Many apps delay the success toast until a modal overlay is removed. A 150ms
@@ -531,6 +800,8 @@ async def wait_for_ui_settle(page: Page, *, watch_flash: bool = False) -> Option
         loc = page.get_by_role("status").or_(page.get_by_role("alert"))
         await loc.first.wait_for(state="visible", timeout=2500)
         flash = " ".join((await loc.first.inner_text()).split())
+        if flash and authenticated_state is not None:
+            flash = redact_authenticated_text(flash, authenticated_state)
         if flash:
             log(f"  Captured flash/status: {flash!r}", "OK")
     except Exception:
@@ -542,17 +813,24 @@ def _is_flash_assert(fuzzy: FuzzyStep) -> bool:
     return fuzzy.action == "assert" and bool(_FLASH_ASSERT_RE.search(fuzzy.target or ""))
 
 
-async def snapshot_interactive_dom(page: Page) -> list[dict[str, Any]]:
+async def snapshot_interactive_dom(page: Page, authenticated_state: dict | None = None) -> list[dict[str, Any]]:
     last_err: Optional[Exception] = None
     for attempt in range(1, 4):
         await wait_for_stable_page(page)
         try:
-            log(f"Snapshotting interactive DOM on: {page.url}")
+            snapshot_url = (
+                redact_authenticated_url(page.url or "", authenticated_state)
+                if authenticated_state is not None
+                else page.url
+            )
+            log(f"Snapshotting interactive DOM on: {snapshot_url}")
             elements = await page.evaluate(_EXTRACT_JS)
             if len(elements) < 8:
                 log(f"  Sparse snapshot ({len(elements)}) — waiting for more UI", "WARN")
                 await page.wait_for_timeout(2000)
                 elements = await page.evaluate(_EXTRACT_JS)
+            if authenticated_state is not None:
+                elements = redact_authenticated_dom(elements, authenticated_state)
             log(f"DOM snapshot complete — {len(elements)} interactive element(s) found")
             log_snapshot_preview(elements)
             return elements
@@ -693,19 +971,28 @@ async def ground_step(chain, fuzzy: FuzzyStep, dom: list[dict], history: list[st
     step.step_number = fuzzy.step_number           # keep numbering authoritative
     step.reclassified = step.reclassified or (step.action != fuzzy.action)
 
-    # If the LLM forgot to carry over the value for actions that need one, fall back to fuzzy
-    if step.value is None and fuzzy.value is not None and step.action in ("type", "press", "select", "navigate"):
-        log(f"  LLM returned value=None for [{step.action}] — restoring fuzzy value: {fuzzy.value!r}", "WARN")
+    # Parse owns literal values. Refine grounds the target, not what gets typed,
+    # selected, pressed or navigated to.
+    if fuzzy.value is not None and step.action in ("type", "press", "select", "navigate"):
+        if step.value != fuzzy.value:
+            log(f"  Restoring parser value for [{step.action}]: {fuzzy.value!r}", "WARN")
         step.value = fuzzy.value
     if step.action == "press":
         step.value = _normalize_key(step.value or fuzzy.value)
 
     _sanitize_text_locator(step, fuzzy)
     _resolve_assert_target(step, fuzzy, dom)
-    if step.element_index is not None and not step.host_tag:
+    _promote_unique_icon_locator(step, fuzzy, dom)
+    # This is observed DOM evidence, never a model-owned claim.
+    step.title_only_name = None
+    if step.element_index is not None:
         matched = next((el for el in dom if el.get("index") == step.element_index), None)
         if matched:
-            step.host_tag = matched.get("tag")
+            if not step.host_tag:
+                step.host_tag = matched.get("tag")
+            title = (matched.get("title") or "").strip()
+            if title and not (matched.get("text") or "").strip() and step.locator_strategy == "role":
+                step.title_only_name = title
 
     log(f"  LLM grounded to: {step.locator_strategy}:{step.locator_value!r}  confidence={step.confidence:.2f}")
 
@@ -801,7 +1088,7 @@ _TEXT_SCOPE_TAGS = {"b", "strong", "h1", "h2", "h3", "h4", "h5", "h6"}
 
 
 def _text_locator_expr(value: str, host_tag: Optional[str] = None) -> str:
-    q = json.dumps
+    q = lambda item: json.dumps(item, ensure_ascii=False)
     v = _primary_visible_text(value)
     tag = (host_tag or "").lower()
     if tag in _TEXT_SCOPE_TAGS:
@@ -868,6 +1155,47 @@ def _resolve_assert_target(step: RefinedStep, fuzzy: FuzzyStep, dom: list[dict[s
         )
 
 
+def _promote_unique_icon_locator(
+    step: RefinedStep, fuzzy: FuzzyStep, dom: list[dict[str, Any]]
+) -> None:
+    """Replace a tag-only CSS guess with a stable descendant-icon selector."""
+    if step.element_index is None or step.locator_strategy != "css":
+        return
+    matched = next((el for el in dom if el.get("index") == step.element_index), None)
+    if not matched:
+        return
+    tag = (matched.get("tag") or "").strip().lower()
+    icon = (matched.get("icon") or "").strip().lower()
+    current = (step.locator_value or "").strip().lower()
+    is_positional = bool(
+        re.fullmatch(rf"{re.escape(tag)}(?::nth-(?:of-type|child)\(\d+\))?", current)
+    )
+    is_lucide_guess = bool(
+        re.fullmatch(
+            rf"{re.escape(tag)}:has\((?:svg)?\[data-lucide=[\"'][a-z0-9_-]+[\"']\]\)",
+            current,
+        )
+    )
+    if not (is_positional or is_lucide_guess):
+        return
+    if not re.fullmatch(r"[a-z0-9_-]+", icon):
+        return
+    if icon not in _step_keywords(fuzzy):
+        return
+    same = [
+        el for el in dom
+        if (el.get("tag") or "").strip().lower() == tag
+        and (el.get("icon") or "").strip().lower() == icon
+    ]
+    if len(same) != 1:
+        return
+    step.locator_value = (
+        f'{tag}:has(svg[data-lucide="{icon}"]), {tag}:has(svg.lucide-{icon})'
+    )
+    step.notes = None
+    step.confidence = max(step.confidence, 0.85)
+
+
 def _sanitize_text_locator(step: RefinedStep, fuzzy: Optional[FuzzyStep] = None) -> None:
     if step.locator_strategy not in ("text", "label", "placeholder", "role"):
         return
@@ -931,7 +1259,7 @@ def locator_expr(step: RefinedStep) -> str:
     durable — when role==listbox and the locator_value is an accessible name
     (not a role keyword), we emit get_by_label instead.
     """
-    q = json.dumps
+    q = lambda item: json.dumps(item, ensure_ascii=False)
     s, v = step.locator_strategy, step.locator_value
 
     if s == "label":
@@ -963,7 +1291,107 @@ def locator_expr(step: RefinedStep) -> str:
 # 5. Execute one grounded step + assert its expected result
 # ===========================================================================
 
-async def execute_step(page: Page, step: RefinedStep, base_url: str) -> None:
+async def _execute_authored_assertion(page: Page, loc, outcome: dict[str, Any]) -> bool:
+    """Execute parser-owned assertion semantics without letting grounding rewrite them."""
+    handled = False
+
+    if isinstance(outcome.get("title"), str):
+        await expect(loc).to_have_attribute("title", outcome["title"], timeout=5000)
+        handled = True
+    accessible_name = outcome.get("accessible_name")
+    if isinstance(accessible_name, str):
+        await expect(loc).to_have_accessible_name(accessible_name, timeout=5000)
+        handled = True
+    visibility = str(outcome.get("visible", outcome.get("visibility", ""))).lower()
+    if visibility in {"true", "false", "visible", "hidden"}:
+        if visibility in {"true", "visible"}:
+            await expect(loc).to_be_visible(timeout=5000)
+        else:
+            await expect(loc).to_be_hidden(timeout=5000)
+        handled = True
+
+    if outcome.get("url_equals"):
+        await expect(page).to_have_url(str(outcome["url_equals"]), timeout=5000)
+        handled = True
+    if outcome.get("url_contains"):
+        await expect(page).to_have_url(
+            re.compile(re.escape(str(outcome["url_contains"]))), timeout=5000
+        )
+        handled = True
+    if outcome.get("url_not_contains"):
+        await expect(page).not_to_have_url(
+            re.compile(re.escape(str(outcome["url_not_contains"]))), timeout=5000
+        )
+        handled = True
+
+    absent_text = outcome.get("visible_text_absent") or outcome.get("not_visible_text")
+    if absent_text:
+        await expect(page.get_by_text(str(absent_text), exact=False)).to_have_count(0)
+        handled = True
+
+    checked_value = outcome.get("checked")
+    if checked_value is not None:
+        normalized = str(checked_value).strip().lower()
+        if normalized in {"true", "checked", "yes", "1"}:
+            checked = True
+        elif normalized in {"false", "unchecked", "no", "0"}:
+            checked = False
+        else:
+            raise ValueError(f"Unsupported checked assertion value: {checked_value!r}")
+        await expect(loc).to_be_checked(checked=checked, timeout=5000)
+        handled = True
+
+    field_value = outcome.get("field_value")
+    multi_field_description = field_value and "still shows" in str(field_value).lower()
+    if field_value is not None and checked_value is None and not multi_field_description:
+        await expect(loc).to_have_value(str(field_value), timeout=5000)
+        handled = True
+
+    if "element_count" in outcome:
+        count_match = re.match(r"\s*(\d+)", str(outcome["element_count"]))
+        if not count_match:
+            raise ValueError(f"Unsupported element_count assertion: {outcome['element_count']!r}")
+        count = int(count_match.group(1))
+        if not (absent_text and count == 0):
+            await expect(loc).to_have_count(count, timeout=5000)
+        handled = True
+
+    text_contains = outcome.get("text_contains")
+    if text_contains:
+        await expect(loc).to_contain_text(str(text_contains), timeout=5000)
+        handled = True
+
+    visible_text = outcome.get("visible_text")
+    if visible_text:
+        await expect(
+            page.get_by_text(str(visible_text), exact=False).filter(visible=True).first
+        ).to_be_visible(timeout=5000)
+        handled = True
+
+    visible_text_exact = outcome.get("visible_text_exact")
+    if visible_text_exact:
+        await expect(
+            page.get_by_text(str(visible_text_exact), exact=True).filter(visible=True).first
+        ).to_be_visible(timeout=5000)
+        handled = True
+
+    visible_heading = outcome.get("visible_heading")
+    if visible_heading:
+        await expect(
+            page.get_by_role("heading", name=str(visible_heading), exact=True)
+            .filter(visible=True).first
+        ).to_be_visible(timeout=5000)
+        handled = True
+
+    return handled
+
+
+async def execute_step(
+    page: Page,
+    step: RefinedStep,
+    base_url: str,
+    expected_outcome: Optional[dict[str, Any]] = None,
+) -> None:
     loc = to_locator(page, step)
     a = step.action
     log(f"  Executing [{a}] on {step.locator_strategy}:{step.locator_value!r}")
@@ -999,6 +1427,14 @@ async def execute_step(page: Page, step: RefinedStep, base_url: str) -> None:
         log(f"  Waiting {ms}ms")
         await page.wait_for_timeout(ms)
     elif a == "assert":
+        if expected_outcome and await _execute_authored_assertion(page, loc, expected_outcome):
+            descriptive = {"assertion", "assert_values", "element_visible", "visible_element", "element_state"}
+            semantic = set(expected_outcome) - descriptive
+            pagewide = {"visible_text", "visible_text_exact", "visible_heading", "visible_text_absent", "not_visible_text", "url_equals", "url_contains", "url_not_contains"}
+            if semantic and semantic <= pagewide:
+                step.confidence = max(step.confidence, 0.95)
+            log("  Authored assertion executed", "OK")
+            return
         # Literal visible strings the model extracted (assert_values); never the
         # prose description. Duplicate names (nav + page title) are OK for
         # visibility — uniqueness is only required for clicks.
@@ -1013,6 +1449,10 @@ async def execute_step(page: Page, step: RefinedStep, base_url: str) -> None:
                 await expect(loc).to_contain_text(val, timeout=5000)
         elif len(values) == 1:
             val = _primary_visible_text(values[0])
+            if step.title_only_name == val and _role_accessible_name(step) == val:
+                log(f"  Asserting title-only grounded role/name is visible: {val!r}")
+                await expect(loc).to_be_visible(timeout=5000)
+                return
             log(f"  Asserting visible text: {val!r}")
             try:
                 n = await loc.count()
@@ -1079,7 +1519,8 @@ def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
         action = s["action"]
         desc = s.get("description", "")
         hint = (s.get("target") or {}).get("css_selector")
-        value = _first_quoted(desc)
+        parsed_value = s.get("input_value") if "input_value" in s else s.get("value")
+        value = parsed_value if parsed_value is not None else _first_quoted(desc)
 
         press_match = _PRESS_STEP.search(desc)
         if press_match and action in ("type", "click", "press"):
@@ -1096,8 +1537,8 @@ def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
         if action == "navigate":
             if not seen_first_navigate:
                 seen_first_navigate = True
-                value = base_url
-                log(f"  Step {step_no}: first navigate -> using base_url {base_url!r}")
+                value = value or base_url
+                log(f"  Step {step_no}: first navigate -> using {value!r}")
             elif _is_element_ref(hint):
                 action = "wait"       # spurious "navigate to #page" = a transition result
                 value = None
@@ -1115,6 +1556,7 @@ def adapt_plan(plan: dict) -> tuple[list[FuzzyStep], str, list[str]]:
             target=target,
             value=value,
             expected_result=desc,
+            expected_outcome=dict(s.get("expected_outcome") or {}),
             original_selector=hint,
         ))
     log(f"Plan adapted — {len(steps)} fuzzy step(s) ready  ({len(warnings)} pre-flight warning(s))")
@@ -1135,7 +1577,17 @@ async def refine(
     headless: bool,
     max_retries: int,
     confidence_floor: float,
+    auth_hook: Optional[str] = None,
 ) -> dict:
+    plan_base_url = plan.get("workflow", {}).get("base_url", "")
+    requested_start_url = start_url or plan_base_url
+    if auth_hook:
+        if canonical_origin(requested_start_url) != canonical_origin(plan_base_url):
+            raise ValueError("runtime authentication start URL must match the plan base URL origin")
+        Path(auth_hook).resolve(strict=True)
+        runtime_helper = Path(__file__).resolve().parent.parent / "runtime" / "auth-hook-runner.cjs"
+        if not runtime_helper.exists():
+            raise RuntimeError("runtime authentication requires a source or editable checkout containing runtime/auth-hook-runner.cjs")
     fuzzy_steps, base_url, warnings = adapt_plan(plan)
     start_url = start_url or base_url
     chain = build_refiner(backend, model)
@@ -1148,10 +1600,21 @@ async def refine(
 
     log(f"Launching browser (headless={headless})")
     async with async_playwright() as p:
-        browser, context, page = await launch_browser_page(p, headless=headless)
-        log(f"Navigating to start URL: {start_url}")
+        storage_state = acquire_storage_state(auth_hook, start_url) if auth_hook else None
+        browser, context, page = await launch_browser_page(p, headless=headless, storage_state=storage_state)
+        safe_start_url = (
+            redact_authenticated_url(start_url, storage_state)
+            if auth_hook
+            else start_url
+        )
+        log(f"Navigating to start URL: {safe_start_url}")
         await page.goto(start_url)
-        log(f"Page loaded: {page.url!r}", "OK")
+        loaded_url = (
+            redact_authenticated_url(page.url or "", storage_state)
+            if auth_hook
+            else page.url
+        )
+        log(f"Page loaded: {loaded_url!r}", "OK")
 
         stop_flow = False
         total = len(fuzzy_steps)
@@ -1182,7 +1645,9 @@ async def refine(
                 history.append(f"step {step.step_number}: terminate (end of flow)")
                 continue
 
-            if _is_flash_assert(fuzzy) and last_flash:
+            # Captured flash evidence cannot establish authored URL, field, or
+            # text expectations. Run those through normal execution and retry.
+            if _is_flash_assert(fuzzy) and last_flash and not fuzzy.expected_outcome:
                 log(f"  Toast/status assert using captured message {last_flash!r}", "OK")
                 step = RefinedStep(
                     step_number=fuzzy.step_number,
@@ -1199,7 +1664,7 @@ async def refine(
                     assert_values=[last_flash],
                 )
                 try:
-                    await execute_step(page, step, base_url)
+                    await execute_step(page, step, base_url, fuzzy.expected_outcome)
                 except Exception as e:
                     log(
                         f"  Flash already dismissed ({e}) — accepting captured {last_flash!r}",
@@ -1218,7 +1683,11 @@ async def refine(
             while True:
                 attempt += 1
                 try:
-                    await wait_for_app_page(page, headless=headless)
+                    await wait_for_app_page(
+                        page,
+                        headless=headless,
+                        authenticated_state=storage_state if auth_hook else None,
+                    )
                 except Exception as e:
                     log(f"  Step {fuzzy.step_number} blocked by interstitial: {e}", "ERROR")
                     step = RefinedStep(
@@ -1240,7 +1709,7 @@ async def refine(
                     stop_flow = True
                     break
 
-                dom = await snapshot_interactive_dom(page)
+                dom = await snapshot_interactive_dom(page, storage_state if auth_hook else None)
                 step = await ground_step(chain, fuzzy, dom, history)
 
                 if not grounding_matches_dom(step, dom) and step.action in {"click", "type", "select", "hover", "drag"}:
@@ -1256,9 +1725,14 @@ async def refine(
                         )
                         await page.wait_for_timeout(1000)
                         continue
+                    current_url = (
+                        redact_authenticated_url(page.url or "", storage_state)
+                        if auth_hook
+                        else page.url
+                    )
                     step.notes = (
                         f"⚠️ FAILED after {attempt} attempts: target {step.locator_value!r} "
-                        f"is not in the live DOM (page {page.url}). "
+                        f"is not in the live DOM (page {current_url}). "
                         + (step.notes or "")
                     )
                     step.confidence = min(step.confidence, 0.2)
@@ -1277,13 +1751,14 @@ async def refine(
                     await page.wait_for_timeout(500)
                     continue
                 try:
-                    await execute_step(page, step, base_url)
+                    await execute_step(page, step, base_url, fuzzy.expected_outcome)
                     log(f"  Waiting for page to settle...")
                     flash = await wait_for_ui_settle(
                         page,
                         watch_flash=bool(
                             _SUBMITISH.search(f"{step.locator_value or ''} {step.value or ''}")
                         ),
+                        authenticated_state=storage_state if auth_hook else None,
                     )
                     if flash:
                         last_flash = flash
@@ -1340,6 +1815,18 @@ async def refine(
 # 8. Serialize back into the parser's schema (drop-in for the generator)
 # ===========================================================================
 
+def _merge_expected_outcome(original: dict, refined: RefinedStep) -> dict:
+    """Add grounding evidence without discarding the parser's expectations."""
+    merged = dict(original.get("expected_outcome") or {})
+    if refined.expected_result:
+        merged.setdefault("assertion", refined.expected_result)
+    if refined.assert_values:
+        merged["assert_values"] = list(refined.assert_values)
+    else:
+        merged.setdefault("assert_values", [])
+    return merged
+
+
 def _serialize(plan, fuzzy_steps, refined_steps, original_by_no, ambiguities, base_url) -> dict:
     fuzzy_by_no = {f.step_number: f for f in fuzzy_steps}
     out_steps = []
@@ -1357,13 +1844,11 @@ def _serialize(plan, fuzzy_steps, refined_steps, original_by_no, ambiguities, ba
                 "strategy": r.locator_strategy,
                 "locator_value": r.locator_value,
                 "role": r.role_name,
+                "title_only_name": r.title_only_name,
                 "css_selector": r.locator_value if r.locator_strategy == "css" else None,
                 "original_selector": fuzzy.original_selector if fuzzy else None,
             },
-            "expected_outcome": {
-                "assertion": r.expected_result,
-                "assert_values": r.assert_values,
-            },
+            "expected_outcome": _merge_expected_outcome(original, r),
             "refinement": {
                 "confidence": round(r.confidence, 2),
                 # grounded=True if the step actually executed (no FAILED note), regardless of LLM confidence
@@ -1394,12 +1879,14 @@ def main() -> None:
     ap.add_argument("--out", default="refined_action_plan.json", help="Where to write the refined plan")
     ap.add_argument("--url", default=None, help="Start URL (defaults to workflow.base_url, then $QA_BASE_URL)")
     ap.add_argument("--backend", default=None,
-                    choices=["ollama", "anthropic", "openai", "google"],
+                    choices=config.BACKENDS,
                     help="LLM provider for grounding (default: $LLM_BACKEND or anthropic)")
     ap.add_argument("--model", default=None, help="override the backend's default model")
     ap.add_argument("--headed", action="store_true", help="Run the browser headed (visible)")
     ap.add_argument("--max-retries", type=int, default=2)
     ap.add_argument("--confidence-floor", type=float, default=0.5)
+    ap.add_argument("--auth-hook", default=None,
+                    help="trusted local JS authentication hook; session state remains memory-only")
     args = ap.parse_args()
 
     backend = config.backend(args.backend)
@@ -1415,6 +1902,7 @@ def main() -> None:
         headless=not args.headed,
         max_retries=args.max_retries,
         confidence_floor=args.confidence_floor,
+        auth_hook=args.auth_hook,
     ))
 
     with open(args.out, "w", encoding="utf-8") as f:
