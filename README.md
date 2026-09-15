@@ -75,6 +75,37 @@ configured default. These backends are optional because provider subscription
 terms can differ from API terms; confirm the intended use before presenting
 subscription access as a supported commercial integration.
 
+### Test a signed-in workflow without saving credentials
+
+For apps that need a real session, refinement and generated tests can use a
+trusted local authentication hook. The hook signs in at run time and returns
+Playwright browser state through a local pipe. Credentials stay out of the
+steps file, model prompt, saved plan, generated spec, command arguments, and
+pipeline logs.
+
+```js
+// auth-hook.cjs. Keep this local and out of Git.
+module.exports.authenticate = async ({ page, baseURL }) => {
+  // Resolve credentials from your normal secret store or test environment.
+  await page.goto(new URL('/login', baseURL).href);
+  await page.getByLabel('Email').fill(process.env.QA_TEST_EMAIL);
+  await page.getByLabel('Password').fill(process.env.QA_TEST_PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+};
+```
+
+```bash
+qa-refine --plan action_plan.json --out refined_action_plan.json \
+  --auth-hook "$PWD/auth-hook.cjs"
+qa-generate refined_action_plan.json tests/generated.spec.ts --runtime-auth
+QA_AUTH_HOOK="$PWD/auth-hook.cjs" npx playwright test tests/generated.spec.ts
+```
+
+Hooks are executable local code with the same access as the QA process, so use
+only a hook you trust. The first implementation accepts session state only for
+the app's exact HTTP(S) origin and requires a source or editable checkout. See
+`runtime/README.md` for the boundary and current limitations.
+
 ---
 
 ## Quick start (bundled demo app)
@@ -167,6 +198,7 @@ The steps LLM cannot see the DOM, so its selectors are guesses. `qa-refine` open
 │   ├── parse_steps.py      # stage 1: steps.txt → action_plan.json
 │   ├── refine_plan.py      # stage 2: ground plan on live DOM
 │   └── generate.py         # stage 3: plan → Playwright spec
+├── runtime/                # opt-in memory-only authentication bridge
 ├── demo_app/               # self-contained fixture apps (Kestrel)
 │   ├── index.html          # expense reports (has login)
 │   └── calendar.html       # calendar (no login)

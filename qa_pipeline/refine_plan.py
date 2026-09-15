@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 import json
 import re
 from typing import Any, Literal, Optional
@@ -53,6 +54,7 @@ from datetime import datetime
 
 from qa_pipeline import config
 from qa_pipeline.llm import build_llm
+from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin
 
 
 def log(msg: str, level: str = "INFO") -> None:
@@ -95,6 +97,7 @@ class RefinedStep(BaseModel):
     locator_value: str = Field(description="Accessible name / label / test id / text / css selector.")
     role_name: Optional[str] = Field(default=None, description="ARIA role when strategy=='role'.")
     host_tag: Optional[str] = Field(default=None, description="Matched element's tag; used to scope text locators.")
+    title_only_name: Optional[str] = Field(default=None, description="Accessible name supplied only by title, with no rendered text.")
     value: Optional[str] = None
     expected_result: str
     confidence: float = Field(ge=0.0, le=1.0)
@@ -109,6 +112,9 @@ class RefinedStep(BaseModel):
 
 _EXTRACT_JS = r"""
 () => {
+  // Handles are valid only for one snapshot. Dynamic UIs can make a previously
+  // indexed element ineligible, so clear every old marker before reindexing.
+  document.querySelectorAll('[data-ai-index]').forEach((el) => el.removeAttribute('data-ai-index'));
   const SEMANTIC = 'a,button,input,select,textarea,summary,[role],[onclick],[tabindex]:not([tabindex="-1"]),h1,h2,h3,h4,h5,h6,[data-testid],[data-test-id],[class*="badge"],[jsaction],[contenteditable="true"]';
   const POINTER_TAGS = 'div,span,li,td,th,p,label,section,article,header,nav,em,strong,i,b';
   const isVisible = (el) => {
@@ -219,9 +225,19 @@ _EXTRACT_JS = r"""
       text: firstLine.slice(0, 80),
       label: label,
       placeholder: el.getAttribute('placeholder'),
+      title: el.getAttribute('title'),
       name: el.getAttribute('name'),
       id: el.id || null,
       testid: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || null,
+      icon: (() => {
+        const svg = el.querySelector('svg[data-lucide], svg.lucide');
+        if (!svg) return null;
+        if (svg.dataset?.lucide) return svg.dataset.lucide;
+        const iconClass = Array.from(svg.classList).find(
+          cls => cls.startsWith('lucide-') && cls !== 'lucide-icon'
+        );
+        return iconClass ? iconClass.slice('lucide-'.length) : null;
+      })(),
       bg: window.getComputedStyle(el).backgroundColor,   // helps match "blue button"
       box: {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)},
     };
@@ -252,7 +268,7 @@ _ELEMENT_ACTIONS = {"click", "type", "select", "hover", "assert", "drag"}
 def _element_search_blob(el: dict[str, Any]) -> str:
     return " ".join(
         str(el.get(k) or "")
-        for k in ("text", "label", "placeholder", "name", "testid", "id")
+        for k in ("text", "label", "placeholder", "title", "name", "testid", "id", "icon")
     )
 
 
@@ -339,7 +355,7 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
     role = el.get("role")
     if role and role not in {"none", "presentation"}:
         out["role"] = role
-    for key in ("type", "text", "label", "placeholder", "name", "testid", "id"):
+    for key in ("type", "text", "label", "placeholder", "title", "name", "testid", "id", "icon"):
         val = el.get(key)
         if val:
             out[key] = val[:80] if isinstance(val, str) else val
@@ -459,7 +475,15 @@ def grounding_matches_dom(step: RefinedStep, dom: list[dict[str, Any]]) -> bool:
     if step.action not in {"click", "type", "select", "hover", "drag"}:
         return True
     if step.element_index is not None:
-        return any(el.get("index") == step.element_index for el in dom)
+        matched = next((el for el in dom if el.get("index") == step.element_index), None)
+        if not matched:
+            return False
+        if step.locator_strategy == "css":
+            selector = (step.locator_value or "").strip().lower()
+            tag = (matched.get("tag") or "").strip().lower()
+            if selector == tag and sum((el.get("tag") or "").lower() == tag for el in dom) > 1:
+                return False
+        return True
     needle = (step.locator_value or "").strip()
     if not needle or needle.lower() == "n/a":
         return False
@@ -470,7 +494,7 @@ def grounding_matches_dom(step: RefinedStep, dom: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def launch_browser_page(p, *, headless: bool):
+async def launch_browser_page(p, *, headless: bool, storage_state: dict | None = None):
     """Launch Chromium in a realistic context so sites are less likely to serve a bot wall."""
     args = ["--disable-blink-features=AutomationControlled"]
     browser = None
@@ -484,6 +508,7 @@ async def launch_browser_page(p, *, headless: bool):
     context = await browser.new_context(
         viewport={"width": 1280, "height": 800},
         locale="en-US",
+        storage_state=storage_state,
     )
     await context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
@@ -707,10 +732,17 @@ async def ground_step(chain, fuzzy: FuzzyStep, dom: list[dict], history: list[st
 
     _sanitize_text_locator(step, fuzzy)
     _resolve_assert_target(step, fuzzy, dom)
-    if step.element_index is not None and not step.host_tag:
+    _promote_unique_icon_locator(step, fuzzy, dom)
+    # This is observed DOM evidence, never a model-owned claim.
+    step.title_only_name = None
+    if step.element_index is not None:
         matched = next((el for el in dom if el.get("index") == step.element_index), None)
         if matched:
-            step.host_tag = matched.get("tag")
+            if not step.host_tag:
+                step.host_tag = matched.get("tag")
+            title = (matched.get("title") or "").strip()
+            if title and not (matched.get("text") or "").strip() and step.locator_strategy == "role":
+                step.title_only_name = title
 
     log(f"  LLM grounded to: {step.locator_strategy}:{step.locator_value!r}  confidence={step.confidence:.2f}")
 
@@ -873,6 +905,47 @@ def _resolve_assert_target(step: RefinedStep, fuzzy: FuzzyStep, dom: list[dict[s
         )
 
 
+def _promote_unique_icon_locator(
+    step: RefinedStep, fuzzy: FuzzyStep, dom: list[dict[str, Any]]
+) -> None:
+    """Replace a tag-only CSS guess with a stable descendant-icon selector."""
+    if step.element_index is None or step.locator_strategy != "css":
+        return
+    matched = next((el for el in dom if el.get("index") == step.element_index), None)
+    if not matched:
+        return
+    tag = (matched.get("tag") or "").strip().lower()
+    icon = (matched.get("icon") or "").strip().lower()
+    current = (step.locator_value or "").strip().lower()
+    is_positional = bool(
+        re.fullmatch(rf"{re.escape(tag)}(?::nth-(?:of-type|child)\(\d+\))?", current)
+    )
+    is_lucide_guess = bool(
+        re.fullmatch(
+            rf"{re.escape(tag)}:has\((?:svg)?\[data-lucide=[\"'][a-z0-9_-]+[\"']\]\)",
+            current,
+        )
+    )
+    if not (is_positional or is_lucide_guess):
+        return
+    if not re.fullmatch(r"[a-z0-9_-]+", icon):
+        return
+    if icon not in _step_keywords(fuzzy):
+        return
+    same = [
+        el for el in dom
+        if (el.get("tag") or "").strip().lower() == tag
+        and (el.get("icon") or "").strip().lower() == icon
+    ]
+    if len(same) != 1:
+        return
+    step.locator_value = (
+        f'{tag}:has(svg[data-lucide="{icon}"]), {tag}:has(svg.lucide-{icon})'
+    )
+    step.notes = None
+    step.confidence = max(step.confidence, 0.85)
+
+
 def _sanitize_text_locator(step: RefinedStep, fuzzy: Optional[FuzzyStep] = None) -> None:
     if step.locator_strategy not in ("text", "label", "placeholder", "role"):
         return
@@ -972,6 +1045,21 @@ async def _execute_authored_assertion(page: Page, loc, outcome: dict[str, Any]) 
     """Execute parser-owned assertion semantics without letting grounding rewrite them."""
     handled = False
 
+    if isinstance(outcome.get("title"), str):
+        await expect(loc).to_have_attribute("title", outcome["title"], timeout=5000)
+        handled = True
+    accessible_name = outcome.get("accessible_name")
+    if isinstance(accessible_name, str):
+        await expect(loc).to_have_accessible_name(accessible_name, timeout=5000)
+        handled = True
+    visibility = str(outcome.get("visible", outcome.get("visibility", ""))).lower()
+    if visibility in {"true", "false", "visible", "hidden"}:
+        if visibility in {"true", "visible"}:
+            await expect(loc).to_be_visible(timeout=5000)
+        else:
+            await expect(loc).to_be_hidden(timeout=5000)
+        handled = True
+
     if outcome.get("url_equals"):
         await expect(page).to_have_url(str(outcome["url_equals"]), timeout=5000)
         handled = True
@@ -1018,9 +1106,31 @@ async def _execute_authored_assertion(page: Page, loc, outcome: dict[str, Any]) 
             await expect(loc).to_have_count(count, timeout=5000)
         handled = True
 
-    visible_text = outcome.get("text_contains") or outcome.get("visible_text")
+    text_contains = outcome.get("text_contains")
+    if text_contains:
+        await expect(loc).to_contain_text(str(text_contains), timeout=5000)
+        handled = True
+
+    visible_text = outcome.get("visible_text")
     if visible_text:
-        await expect(loc).to_contain_text(str(visible_text), timeout=5000)
+        await expect(
+            page.get_by_text(str(visible_text), exact=False).filter(visible=True).first
+        ).to_be_visible(timeout=5000)
+        handled = True
+
+    visible_text_exact = outcome.get("visible_text_exact")
+    if visible_text_exact:
+        await expect(
+            page.get_by_text(str(visible_text_exact), exact=True).filter(visible=True).first
+        ).to_be_visible(timeout=5000)
+        handled = True
+
+    visible_heading = outcome.get("visible_heading")
+    if visible_heading:
+        await expect(
+            page.get_by_role("heading", name=str(visible_heading), exact=True)
+            .filter(visible=True).first
+        ).to_be_visible(timeout=5000)
         handled = True
 
     return handled
@@ -1068,6 +1178,11 @@ async def execute_step(
         await page.wait_for_timeout(ms)
     elif a == "assert":
         if expected_outcome and await _execute_authored_assertion(page, loc, expected_outcome):
+            descriptive = {"assertion", "assert_values", "element_visible", "visible_element", "element_state"}
+            semantic = set(expected_outcome) - descriptive
+            pagewide = {"visible_text", "visible_text_exact", "visible_heading", "visible_text_absent", "not_visible_text", "url_equals", "url_contains", "url_not_contains"}
+            if semantic and semantic <= pagewide:
+                step.confidence = max(step.confidence, 0.95)
             log("  Authored assertion executed", "OK")
             return
         # Literal visible strings the model extracted (assert_values); never the
@@ -1084,6 +1199,10 @@ async def execute_step(
                 await expect(loc).to_contain_text(val, timeout=5000)
         elif len(values) == 1:
             val = _primary_visible_text(values[0])
+            if step.title_only_name == val and _role_accessible_name(step) == val:
+                log(f"  Asserting title-only grounded role/name is visible: {val!r}")
+                await expect(loc).to_be_visible(timeout=5000)
+                return
             log(f"  Asserting visible text: {val!r}")
             try:
                 n = await loc.count()
@@ -1208,9 +1327,17 @@ async def refine(
     headless: bool,
     max_retries: int,
     confidence_floor: float,
+    auth_hook: Optional[str] = None,
 ) -> dict:
     fuzzy_steps, base_url, warnings = adapt_plan(plan)
     start_url = start_url or base_url
+    if auth_hook:
+        if canonical_origin(start_url) != canonical_origin(base_url):
+            raise ValueError("runtime authentication start URL must match the plan base URL origin")
+        Path(auth_hook).resolve(strict=True)
+        runtime_helper = Path(__file__).resolve().parent.parent / "runtime" / "auth-hook-runner.cjs"
+        if not runtime_helper.exists():
+            raise RuntimeError("runtime authentication requires a source or editable checkout containing runtime/auth-hook-runner.cjs")
     chain = build_refiner(backend, model)
 
     refined_steps: list[RefinedStep] = []
@@ -1221,7 +1348,8 @@ async def refine(
 
     log(f"Launching browser (headless={headless})")
     async with async_playwright() as p:
-        browser, context, page = await launch_browser_page(p, headless=headless)
+        storage_state = acquire_storage_state(auth_hook, start_url) if auth_hook else None
+        browser, context, page = await launch_browser_page(p, headless=headless, storage_state=storage_state)
         log(f"Navigating to start URL: {start_url}")
         await page.goto(start_url)
         log(f"Page loaded: {page.url!r}", "OK")
@@ -1444,6 +1572,7 @@ def _serialize(plan, fuzzy_steps, refined_steps, original_by_no, ambiguities, ba
                 "strategy": r.locator_strategy,
                 "locator_value": r.locator_value,
                 "role": r.role_name,
+                "title_only_name": r.title_only_name,
                 "css_selector": r.locator_value if r.locator_strategy == "css" else None,
                 "original_selector": fuzzy.original_selector if fuzzy else None,
             },
@@ -1484,6 +1613,8 @@ def main() -> None:
     ap.add_argument("--headed", action="store_true", help="Run the browser headed (visible)")
     ap.add_argument("--max-retries", type=int, default=2)
     ap.add_argument("--confidence-floor", type=float, default=0.5)
+    ap.add_argument("--auth-hook", default=None,
+                    help="trusted local JS authentication hook; session state remains memory-only")
     args = ap.parse_args()
 
     backend = config.backend(args.backend)
@@ -1499,6 +1630,7 @@ def main() -> None:
         headless=not args.headed,
         max_retries=args.max_retries,
         confidence_floor=args.confidence_floor,
+        auth_hook=args.auth_hook,
     ))
 
     with open(args.out, "w", encoding="utf-8") as f:

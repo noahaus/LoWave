@@ -15,11 +15,237 @@ from qa_pipeline.refine_plan import (
     _execute_authored_assertion,
     _serialize,
     adapt_plan,
+    execute_step,
     ground_step,
     locator_expr,
     snapshot_interactive_dom,
     to_locator,
 )
+
+
+def test_resnapshot_clears_stale_ai_indexes_from_dynamic_dom() -> None:
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<div id="composer" style="cursor:pointer;width:100px;height:30px">Composer</div>')
+            await snapshot_interactive_dom(page)
+            await page.evaluate("""() => {
+              const old = document.querySelector('#composer');
+              old.style.cursor = 'default';
+              old.textContent = '';
+              const button = document.createElement('button');
+              button.textContent = 'Settings';
+              document.body.appendChild(button);
+            }""")
+            await snapshot_interactive_dom(page)
+            assert await page.locator('[data-ai-index="0"]').count() == 1
+            assert await page.locator('button[data-ai-index="0"]').count() == 1
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_snapshot_preserves_title_only_button_name() -> None:
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<button title="Private"><svg></svg></button>')
+            snapshot = await snapshot_interactive_dom(page)
+            assert snapshot[0]["title"] == "Private"
+            assert await page.get_by_role("button", name="Private", exact=True).count() == 1
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_snapshot_exposes_an_icon_name_for_an_unnamed_button() -> None:
+    """Removing descendant-icon capture would make icon-only controls indistinguishable."""
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<button><svg data-lucide="send"></svg></button>')
+            snapshot = await snapshot_interactive_dom(page)
+            assert snapshot[0]["icon"] == "send"
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_snapshot_exposes_react_lucide_icon_class_for_an_unnamed_button() -> None:
+    """lucide-react identifies icons by class, not data-lucide."""
+    async def run() -> None:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            await page.set_content(
+                '<button><svg class="lucide lucide-settings" aria-hidden="true"></svg></button>'
+            )
+            snapshot = await snapshot_interactive_dom(page)
+            assert snapshot[0]["icon"] == "settings"
+            await browser.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "model_selector",
+    ["button", "button:nth-of-type(7)", 'button:has([data-lucide="send"])'],
+)
+def test_ground_step_replaces_a_broad_button_selector_with_its_unique_icon(model_selector) -> None:
+    fuzzy = FuzzyStep(
+        step_number=1, step_id="send", action="click", target="send icon button"
+    )
+    claimed = RefinedStep(
+        step_number=1, action="click", element_index=1, locator_strategy="css",
+        locator_value=model_selector, expected_result="Entry saves", confidence=0.68,
+    )
+    dom = [
+        {"index": 0, "tag": "button", "role": "button", "text": "Settings", "icon": "settings"},
+        {"index": 1, "tag": "button", "role": "button", "text": "", "icon": "send"},
+    ]
+    grounded = asyncio.run(ground_step(_FixedChain(claimed), fuzzy, dom, []))
+    assert grounded.locator_strategy == "css"
+    assert grounded.locator_value == (
+        'button:has(svg[data-lucide="send"]), button:has(svg.lucide-send)'
+    )
+
+
+def test_ambiguous_broad_css_does_not_count_as_grounded() -> None:
+    step = RefinedStep(
+        step_number=1, action="click", element_index=1, locator_strategy="css",
+        locator_value="button", expected_result="Entry saves", confidence=0.68,
+    )
+    dom = [
+        {"index": 0, "tag": "button", "role": "button", "text": "Cancel"},
+        {"index": 1, "tag": "button", "role": "button", "text": ""},
+    ]
+    from qa_pipeline.refine_plan import grounding_matches_dom
+    assert not grounding_matches_dom(step, dom)
+
+
+def test_ground_step_does_not_promote_the_wrong_icon_for_the_instruction() -> None:
+    fuzzy = FuzzyStep(
+        step_number=1, step_id="settings", action="click", target="Settings icon button"
+    )
+    claimed = RefinedStep(
+        step_number=1, action="click", element_index=1, locator_strategy="css",
+        locator_value="button:nth-of-type(7)", expected_result="Settings open", confidence=0.42,
+    )
+    dom = [
+        {"index": 0, "tag": "button", "role": "button", "text": "", "icon": "settings"},
+        {"index": 1, "tag": "button", "role": "button", "text": "", "icon": "send"},
+    ]
+    grounded = asyncio.run(ground_step(_FixedChain(claimed), fuzzy, dom, []))
+    assert grounded.locator_value == "button:nth-of-type(7)"
+    assert grounded.confidence == 0.42
+
+
+def test_authored_title_checks_attribute_and_visibility():
+    async def run():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<button title="Private">Settings</button>')
+            loc = page.get_by_role("button")
+            assert await _execute_authored_assertion(page, loc, {"title": "Private", "visible": True})
+            with pytest.raises(AssertionError):
+                await _execute_authored_assertion(page, loc, {"title": "Public", "visible": True})
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_assert_uses_grounded_role_name_for_title_only_button() -> None:
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<button title="Private"><svg></svg></button>')
+            step = RefinedStep(
+                step_number=1,
+                action="assert",
+                element_index=0,
+                locator_strategy="role",
+                locator_value="Private",
+                role_name="button",
+                title_only_name="Private",
+                expected_result="Private is visible",
+                confidence=1.0,
+                assert_values=["Private"],
+            )
+            await execute_step(page, step, "http://localhost")
+            assert step.locator_strategy == "role"
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_visible_text_is_pagewide_but_text_contains_stays_locator_scoped() -> None:
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<h2>my journey</h2><p hidden>Golden thread</p><article>Golden thread</article>')
+            loc = page.get_by_role("heading", name="my journey")
+            assert await _execute_authored_assertion(page, loc, {"visible_text": "Golden thread"})
+            with pytest.raises(AssertionError):
+                await _execute_authored_assertion(page, loc, {"visible_text": "Missing journey"})
+            with pytest.raises(AssertionError):
+                await _execute_authored_assertion(page, loc, {"text_contains": "Golden thread"})
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_successful_pagewide_assertion_replaces_irrelevant_model_confidence() -> None:
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<main>Golden thread</main>')
+            step = RefinedStep(
+                step_number=1, action="assert", element_index=0,
+                locator_strategy="css", locator_value="body",
+                expected_result="Post is visible", confidence=0.18,
+            )
+            await execute_step(
+                page, step, "http://localhost", {"visible_text": "Golden thread"}
+            )
+            assert step.confidence >= 0.9
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_parser_exact_text_and_heading_expectations_execute_directly() -> None:
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<h2>Welcome to the Portal</h2><p>Golden thread</p>')
+            loc = page.locator("body")
+            assert await _execute_authored_assertion(
+                page, loc, {"visible_text_exact": "Golden thread"}
+            )
+            assert await _execute_authored_assertion(
+                page, loc, {"visible_heading": "Welcome to the Portal"}
+            )
+            with pytest.raises(AssertionError):
+                await _execute_authored_assertion(
+                    page, loc, {"visible_heading": "the portal"}
+                )
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_parser_visibility_and_accessible_name_expectations_execute() -> None:
+    async def run() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content('<button aria-label="Shared to Portal"></button>')
+            loc = page.get_by_role("button", name="Shared to Portal", exact=True)
+            assert await _execute_authored_assertion(
+                page, loc, {"visibility": "visible", "accessible_name": "Shared to Portal"}
+            )
+            await browser.close()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("fails", [True, False])
@@ -70,6 +296,18 @@ class _FixedChain:
 
     async def ainvoke(self, _payload: dict) -> RefinedStep:
         return self.result.model_copy(deep=True)
+
+
+def test_ground_step_discards_spoofed_title_only_model_claim() -> None:
+    fuzzy = FuzzyStep(step_number=1, step_id="private", action="assert", target="Private is visible")
+    claimed = RefinedStep(
+        step_number=1, action="assert", element_index=0, locator_strategy="role",
+        locator_value="Private", role_name="button", title_only_name="Private",
+        expected_result="Private is visible", confidence=1.0, assert_values=["Private"],
+    )
+    dom = [{"index": 0, "tag": "button", "role": "button", "text": "Private", "title": None}]
+    grounded = asyncio.run(ground_step(_FixedChain(claimed), fuzzy, dom, []))
+    assert grounded.title_only_name is None
 
 
 def test_ground_step_keeps_exact_parser_input_value() -> None:

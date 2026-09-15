@@ -9,7 +9,7 @@
 pydantic>=2.0
 langchain-core>=0.3
 python-dotenv>=1.0        # optional .env loading (config.py degrades gracefully without it)
-playwright>=1.40          # required by refine_plan.py for live-DOM grounding
+playwright>=1.51          # runtime auth requires IndexedDB storage state
 
 # ── default backend (Anthropic) ──────────────────────────
 langchain-anthropic>=0.2

@@ -325,7 +325,8 @@ def test_authored_assertion_newlines_stay_in_string_literal(tmp_path: Path) -> N
     spec = out.read_text()
 
     assert q("line1\nline2") in spec
-    assert "toContainText(" in spec
+    assert "page.getByText('line1\\nline2', { exact: false }).filter({ visible: true }).first()" in spec
+    assert ".toBeVisible()" in spec
 
 
 def test_missing_refinement_confidence_does_not_crash_generate(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

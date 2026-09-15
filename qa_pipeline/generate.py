@@ -17,6 +17,7 @@ import re
 import ast
 import json
 import argparse
+import os
 from pathlib import Path
 
 from qa_pipeline import config
@@ -102,6 +103,18 @@ def _refined_locator_expr(target: dict) -> str | None:
     if value and strategy in {"css", "xpath", "testid"}:
         if strategy == "testid":
             return f"page.getByTestId({q(value)})"
+        lucide = re.fullmatch(
+            r"(?P<tag>[a-z][\w-]*):has\((?:svg)?\[data-lucide=(?P<quote>[\"'])(?P<icon>[a-z0-9_-]+)(?P=quote)\]\)",
+            value,
+            re.I,
+        )
+        if lucide:
+            tag = lucide.group("tag")
+            icon = lucide.group("icon")
+            value = (
+                f'{tag}:has(svg[data-lucide="{icon}"]), '
+                f'{tag}:has(svg.lucide-{icon})'
+            )
         return f"page.locator({q(value)})"
 
     raw = target.get("playwright_locator")
@@ -282,7 +295,8 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
         handled.update({key for key in ("visible_text_absent", "not_visible_text") if key in eo})
 
     field_value = eo.get("field_value")
-    if field_value is not None and expr and "checked" not in eo and not _is_prose(str(field_value)):
+    multi_field_description = field_value and "still shows" in str(field_value).lower()
+    if field_value is not None and expr and "checked" not in eo and not multi_field_description:
         lines.append(f"await expect({expr}).toHaveValue({q(eo['field_value'])});")
         handled.add("field_value")
 
@@ -308,19 +322,54 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
             lines.append(f"await expect({expr}).toHaveCount({count});")
         handled.add("element_count")
 
-    visible_text = eo.get("text_contains") or eo.get("visible_text")
-    if visible_text and not _is_prose(visible_text):
+    text_contains = eo.get("text_contains")
+    if text_contains:
         if expr:
             if "getByText" in expr and ".locator(" not in expr:
                 lines.append(f"await expect({expr}.first()).toBeVisible();")
-                lines.append(f"await expect({expr}.first()).toContainText({q(visible_text)});")
+                lines.append(f"await expect({expr}.first()).toContainText({q(text_contains)});")
             else:
-                lines.append(f"await expect({expr}).toContainText({q(visible_text)});")
+                lines.append(f"await expect({expr}).toContainText({q(text_contains)});")
         else:
             lines.append(
-                f"await expect(page.getByText({q(visible_text)}, {{ exact: false }})).toBeVisible();"
+                f"await expect(page.getByText({q(text_contains)}, {{ exact: false }})).toBeVisible();"
             )
-        handled.update({key for key in ("text_contains", "visible_text") if key in eo})
+        handled.add("text_contains")
+
+    visible_text = eo.get("visible_text")
+    if visible_text:
+        lines.append(
+            f"await expect(page.getByText({q(visible_text)}, {{ exact: false }}).filter({{ visible: true }}).first()).toBeVisible();"
+        )
+        handled.add("visible_text")
+
+    visible_text_exact = eo.get("visible_text_exact")
+    if visible_text_exact:
+        lines.append(
+            f"await expect(page.getByText({q(visible_text_exact)}, {{ exact: true }}).filter({{ visible: true }}).first()).toBeVisible();"
+        )
+        handled.add("visible_text_exact")
+
+    visible_heading = eo.get("visible_heading")
+    if visible_heading:
+        lines.append(
+            f"await expect(page.getByRole('heading', {{ name: {q(visible_heading)}, exact: true }}).filter({{ visible: true }}).first()).toBeVisible();"
+        )
+        handled.add("visible_heading")
+
+    if isinstance(eo.get("title"), str) and expr:
+        lines.append(f"await expect({expr}).toHaveAttribute('title', {q(eo['title'])});")
+        handled.add("title")
+    accessible_name = eo.get("accessible_name")
+    if isinstance(accessible_name, str) and expr:
+        lines.append(f"await expect({expr}).toHaveAccessibleName({q(accessible_name)});")
+        handled.add("accessible_name")
+
+    visibility = str(eo.get("visible", eo.get("visibility", ""))).lower()
+    if visibility in {"true", "false", "visible", "hidden"} and expr:
+        matcher = "toBeVisible" if visibility in {"true", "visible"} else "toBeHidden"
+        lines.append(f"await expect({expr}).{matcher}();")
+        handled.update(key for key in ("visible", "visibility") if key in eo)
 
     if lines:
         descriptive = {"assertion", "assert_values", "element_visible", "visible_element", "element_state"}
@@ -347,7 +396,16 @@ def emit_assert(step: dict, refinement: dict | None) -> str:
     if assert_values and refinement and refinement.get("grounded"):
         expr = _refined_locator_expr(target)
         if expr:
-            lines = [f"await expect({expr}).toContainText({q(v)});" for v in assert_values]
+            lines = [
+                f"await expect({expr}).toBeVisible();"
+                if (
+                    target.get("title_only_name") == v
+                    and target.get("strategy") == "role"
+                    and target.get("locator_value") == v
+                )
+                else f"await expect({expr}).toContainText({q(v)});"
+                for v in assert_values
+            ]
             return "\n  ".join(lines)
 
     # ── single-value assert ──────────────────────────────────────────────────
@@ -511,7 +569,7 @@ def _compile_step(step: dict, base_url: str) -> tuple[str, bool]:
 
 # ──────────────────────────── run ───────────────────────────────────────────
 
-def generate(plan_path: Path, output_path: Path, base_url_override: str | None = None) -> int:
+def generate(plan_path: Path, output_path: Path, base_url_override: str | None = None, runtime_auth: bool = False) -> int:
     """Compile a plan file into a Playwright spec. Returns the number of TODO warnings."""
     if not plan_path.exists():
         raise SystemExit(f"ERROR: action plan not found at {plan_path}")
@@ -582,8 +640,27 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
         parts.append(f"  // Step {s.get('step')}: {_one_line(s.get('description', ''))}")
         parts.append(f"  {line}")
     body = "\n".join(parts)
+    import_source = "@playwright/test"
+    runtime_setup = ""
+    if runtime_auth:
+        fixture_file = Path(__file__).resolve().parent.parent / "runtime" / "auth-fixture.ts"
+        if not fixture_file.exists():
+            raise RuntimeError(
+                "runtime authentication fixture is unavailable; use a source or editable checkout"
+            )
+        fixture = fixture_file.with_suffix("")
+        try:
+            import_source = os.path.relpath(fixture, output_path.resolve().parent).replace(os.sep, "/")
+        except ValueError as exc:
+            raise RuntimeError(
+                "runtime authentication fixture and generated test must be on the same filesystem drive"
+            ) from exc
+        if not import_source.startswith("."):
+            import_source = "./" + import_source
+        runtime_setup = f"test.use({{ baseURL: {q(base_url)} }});\n\n"
     code = (
-        "import { test, expect } from '@playwright/test';\n\n"
+        f"import {{ test, expect }} from '{import_source}';\n\n"
+        f"{runtime_setup}"
         f"test({q(title)}, async ({{ page }}) => {{\n"
         f"{body}\n"
         "});\n"
@@ -627,9 +704,11 @@ def main() -> None:
         help="Export an inspectable draft with exit 0 when required steps are unresolved. "
              "The generated spec still fails before page actions.",
     )
+    ap.add_argument("--runtime-auth", action="store_true",
+                    help="emit a spec that requires explicit runtime authentication")
     args = ap.parse_args()
 
-    warnings = generate(Path(args.plan), Path(args.output), args.base_url)
+    warnings = generate(Path(args.plan), Path(args.output), args.base_url, args.runtime_auth)
     if warnings and not args.allow_incomplete:
         raise SystemExit(INCOMPLETE_EXIT_CODE)
 

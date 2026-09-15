@@ -21,6 +21,94 @@ def _step(expected_outcome: dict, target: dict | None = None) -> dict:
     }
 
 
+@pytest.mark.parametrize("key,matcher", [("field_value", "toHaveValue"), ("visible_text", "toBeVisible"), ("text_contains", "toContainText")])
+def test_explicit_literal_expectations_are_not_discarded_as_prose(key, matcher):
+    value = "Noah pipeline local journey. The golden thread appeared exactly when I needed it. " * 2
+    result = emit_assert(_step({key: value}), {"grounded": True})
+    assert "TODO" not in result
+    assert q(value) in result
+    assert matcher in result
+
+
+@pytest.mark.parametrize("visible", [True, "true"])
+def test_explicit_title_and_visibility_generate_both_checks(visible):
+    result = emit_assert(_step({"title": "Private", "visible": visible}), {"grounded": True})
+    assert "TODO" not in result
+    assert ".toHaveAttribute('title', 'Private')" in result
+    assert ".toBeVisible()" in result
+
+
+def test_title_only_grounded_name_generates_visibility_not_text_assertion() -> None:
+    target = {
+        "playwright_locator": 'get_by_role("button", name="Private", exact=True)',
+        "strategy": "role", "locator_value": "Private", "role": "button",
+        "title_only_name": "Private",
+    }
+    result = emit_assert(_step({"assert_values": ["Private"]}, target), {"grounded": True})
+    assert result == "await expect(page.getByRole('button', { name: 'Private', exact: true })).toBeVisible();"
+
+
+def test_rendered_text_grounding_keeps_text_assertion() -> None:
+    target = {
+        "playwright_locator": 'get_by_role("button", name="Private", exact=True)',
+        "strategy": "role", "locator_value": "Private", "role": "button",
+    }
+    result = emit_assert(_step({"assert_values": ["Private"]}, target), {"grounded": True})
+    assert result.endswith(".toContainText('Private');")
+
+
+def test_spoofed_title_metadata_with_role_name_mismatch_keeps_text_assertion() -> None:
+    target = {
+        "playwright_locator": 'get_by_role("button", name="Other", exact=True)',
+        "strategy": "role", "locator_value": "Other", "role": "button",
+        "title_only_name": "Private",
+    }
+    result = emit_assert(_step({"assert_values": ["Private"]}, target), {"grounded": True})
+    assert result.endswith(".toContainText('Private');")
+
+
+def test_visible_text_generation_is_pagewide_while_text_contains_is_scoped() -> None:
+    target = {
+        "playwright_locator": 'get_by_role("heading", name="my journey", exact=True)',
+        "strategy": "role", "locator_value": "my journey", "role": "heading",
+    }
+    pagewide = emit_assert(_step({"visible_text": "Golden thread"}, target), {"grounded": True})
+    scoped = emit_assert(_step({"text_contains": "Golden thread"}, target), {"grounded": True})
+    assert pagewide == "await expect(page.getByText('Golden thread', { exact: false }).filter({ visible: true }).first()).toBeVisible();"
+    assert "getByRole('heading'" in scoped and ".toContainText('Golden thread');" in scoped
+
+
+def test_parser_exact_text_and_heading_expectations_compile_directly() -> None:
+    exact = emit_assert(_step({"visible_text_exact": "Golden thread"}), {"grounded": True})
+    heading = emit_assert(_step({"visible_heading": "Welcome to the Portal"}), {"grounded": True})
+    assert exact == "await expect(page.getByText('Golden thread', { exact: true }).filter({ visible: true }).first()).toBeVisible();"
+    assert heading == "await expect(page.getByRole('heading', { name: 'Welcome to the Portal', exact: true }).filter({ visible: true }).first()).toBeVisible();"
+
+
+def test_parser_visibility_and_accessible_name_expectations_compile() -> None:
+    target = {
+        "playwright_locator": 'get_by_role("button", name="Shared to Portal", exact=True)',
+        "strategy": "role", "locator_value": "Shared to Portal", "role": "button",
+    }
+    result = emit_assert(
+        _step({"visibility": "visible", "accessible_name": "Shared to Portal"}, target),
+        {"grounded": True},
+    )
+    assert "TODO" not in result
+    assert result == (
+        "await expect(page.getByRole('button', { name: 'Shared to Portal', exact: true })).toHaveAccessibleName('Shared to Portal');\n"
+        "  await expect(page.getByRole('button', { name: 'Shared to Portal', exact: true })).toBeVisible();"
+    )
+
+
+def test_failed_pagewide_assertion_remains_incomplete() -> None:
+    step = _step({"visible_text_exact": "Golden thread"})
+    step["refinement"] = {"grounded": False, "confidence": 0.2, "notes": "wrong target"}
+    line, needs_review = _compile_step(step, "http://localhost")
+    assert "TODO" in line
+    assert needs_review
+
+
 @pytest.mark.parametrize("key", ["visible_text_absent", "not_visible_text"])
 def test_absence_assertion_cannot_be_replaced_by_unrelated_grounding(key: str) -> None:
     """Removing this branch would make an absent-error check pass on a login button."""
@@ -65,10 +153,7 @@ def test_visible_text_keeps_authored_expectation_over_substitute_text() -> None:
         {"grounded": True},
     )
 
-    assert result == (
-        "await expect(page.getByRole('button', { name: 'Sign in', exact: true }))"
-        ".toContainText('Email Campaigns');"
-    )
+    assert result == "await expect(page.getByText('Email Campaigns', { exact: false }).filter({ visible: true }).first()).toBeVisible();"
 
 
 def test_field_value_uses_playwright_value_matcher() -> None:
@@ -86,10 +171,7 @@ def test_authored_text_survives_a_substitute_text_locator() -> None:
               {"playwright_locator": 'get_by_text("Sign in")'}),
         {"grounded": True},
     )
-    assert result == (
-        "await expect(page.getByText('Sign in').first()).toBeVisible();\n  "
-        "await expect(page.getByText('Sign in').first()).toContainText('Email Campaigns');"
-    )
+    assert result == "await expect(page.getByText('Email Campaigns', { exact: false }).filter({ visible: true }).first()).toBeVisible();"
 
 
 def test_empty_field_value_is_a_real_assertion() -> None:
@@ -157,6 +239,18 @@ def test_css_locator_keeps_parentheses_and_quotes_intact() -> None:
     }
 
     assert _refined_locator_expr(target) == "page.locator('input:not([type=\"hidden\"])')"
+
+
+def test_lucide_data_selector_has_a_react_class_fallback() -> None:
+    target = {
+        "strategy": "css",
+        "locator_value": 'button:has([data-lucide="settings"])',
+    }
+
+    assert _refined_locator_expr(target) == (
+        "page.locator('button:has(svg[data-lucide=\"settings\"]), "
+        "button:has(svg.lucide-settings)')"
+    )
 
 
 def test_multiline_failure_note_stays_inside_comment() -> None:

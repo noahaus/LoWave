@@ -11,7 +11,13 @@ function defaultModelForBackend(backend) {
   return backend === "ollama" ? "qwen3-coder:30b" : undefined;
 }
 
-function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName) {
+function runtimeAuthEnvironment(authHook) {
+  return authHook
+    ? { QA_AUTH_HOOK: authHook, QA_USERNAME: null, QA_PASSWORD: null }
+    : { QA_AUTH_HOOK: null };
+}
+
+function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName, authHook = "") {
   const canonicalSteps = fs.realpathSync(stepsPath);
   let stem;
   if (hasExplicitSpecName) {
@@ -40,13 +46,16 @@ function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName) {
     .update(baseUrl)
     .update("\0")
     .update(stem)
-    .digest("hex");
-  const workflowDir = path.join(REPO_ROOT, ".qa-pipeline", "workflows", identity);
+  if (authHook) {
+    identity.update("\0runtime-auth\0").update(path.resolve(authHook)).update("\0").update(fs.readFileSync(authHook));
+  }
+  const digest = identity.digest("hex");
+  const workflowDir = path.join(REPO_ROOT, ".qa-pipeline", "workflows", digest);
 
   return {
     actionPlan: path.join(workflowDir, "action_plan.json"),
     refinedPlan: path.join(workflowDir, "refined_action_plan.json"),
-    specPath: path.join(REPO_ROOT, "tests", "generated", identity, `${stem}.spec.ts`),
+    specPath: path.join(REPO_ROOT, "tests", "generated", digest, `${stem}.spec.ts`),
   };
 }
 
@@ -122,9 +131,11 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
       return;
     }
 
+    const childEnv = { ...process.env, ...env, PYTHONUNBUFFERED: "1" };
+    for (const [key, value] of Object.entries(env)) if (value == null) delete childEnv[key];
     const child = spawn(bin, args, {
       cwd,
-      env: { ...process.env, ...env, PYTHONUNBUFFERED: "1" },
+      env: childEnv,
       shell: false,
       // A dedicated POSIX process group lets Stop terminate Python and its CLIs.
       detached: process.platform !== "win32",
@@ -183,6 +194,7 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
  * @param {string} [opts.model]
  * @param {string} [opts.username]
  * @param {string} [opts.password]
+ * @param {string} [opts.authHook] absolute path to explicitly trusted local code
  * @param {boolean} [opts.parse]
  * @param {boolean} [opts.refine]
  * @param {boolean} [opts.generate]
@@ -193,13 +205,28 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
  * @param {AbortSignal} [opts.signal]
  */
 async function runPipeline(opts) {
+  const authHook = opts.authHook ? path.resolve(opts.authHook) : "";
+  if (authHook && (!path.isAbsolute(opts.authHook) || !fs.existsSync(authHook))) {
+    throw new Error("Runtime authentication hook must be an existing absolute path");
+  }
+  if (authHook) {
+    const rawBaseUrl = opts.baseUrl || "http://localhost:3000";
+    const authority = rawBaseUrl.match(/^[a-z][a-z0-9+.-]*:\/\/([^/]*)/i)?.[1] || "";
+    if (/[^\x00-\x7F]/.test(authority)) throw new Error("Runtime authentication requires an ASCII or punycode hostname");
+    const parsedBaseUrl = new URL(rawBaseUrl);
+    if (parsedBaseUrl.username || parsedBaseUrl.password) throw new Error("Runtime authentication base URL must not contain userinfo");
+    const protocol = parsedBaseUrl.protocol;
+    if (protocol !== "http:" && protocol !== "https:") {
+      throw new Error("Runtime authentication requires an HTTP(S) base URL");
+    }
+  }
   const {
     stepsPath,
     baseUrl = "http://localhost:3000",
     backend = "ollama",
     model = defaultModelForBackend(backend),
-    username = "demo@kestrel.app",
-    password = "test1234",
+    username = authHook ? "" : "demo@kestrel.app",
+    password = authHook ? "" : "test1234",
     parse = true,
     refine = true,
     generate = true,
@@ -209,6 +236,10 @@ async function runPipeline(opts) {
     onEvent = () => {},
     signal,
   } = opts;
+
+  if (authHook && (username || password)) {
+    throw new Error("Runtime authentication cannot be combined with legacy credentials");
+  }
 
   if (!stepsPath) {
     throw new Error("Steps file path is required");
@@ -224,7 +255,8 @@ async function runPipeline(opts) {
     resolvedSteps,
     baseUrl,
     specName,
-    Object.hasOwn(opts, "specName") && specName !== undefined
+    Object.hasOwn(opts, "specName") && specName !== undefined,
+    authHook
   );
 
   if (!parse && refine && !fs.existsSync(actionPlan)) {
@@ -256,6 +288,7 @@ async function runPipeline(opts) {
   const throwIfCancelled = () => {
     if (signal?.aborted) throw cancelledError();
   };
+  const authEnv = runtimeAuthEnvironment(authHook);
 
   throwIfCancelled();
   if (parse) {
@@ -270,7 +303,7 @@ async function runPipeline(opts) {
     ];
     if (username) args.push("--username", username);
     if (password) args.push("--password", password);
-    await runCommand(resolveCli("qa-parse"), args, { onLine: log, signal });
+    await runCommand(resolveCli("qa-parse"), args, { onLine: log, signal, env: authEnv });
     emit("parse", "done", actionPlan);
   }
 
@@ -286,8 +319,9 @@ async function runPipeline(opts) {
       baseUrl,
       ...(headed ? ["--headed"] : []),
       ...llmArgs,
+      ...(authHook ? ["--auth-hook", authHook] : []),
     ];
-    await runCommand(resolveCli("qa-refine"), args, { onLine: log, signal });
+    await runCommand(resolveCli("qa-refine"), args, { onLine: log, signal, env: authEnv });
     emit("refine", "done", refinedPlan);
   }
 
@@ -299,8 +333,8 @@ async function runPipeline(opts) {
     try {
       await runCommand(
         resolveCli("qa-generate"),
-        [planIn, specPath, "--base-url", baseUrl],
-        { onLine: log, signal }
+        [planIn, specPath, "--base-url", baseUrl, ...(authHook ? ["--runtime-auth"] : [])],
+        { onLine: log, signal, env: authEnv }
       );
       emit("generate", "done", specPath);
     } catch (err) {
@@ -321,7 +355,7 @@ async function runPipeline(opts) {
       ["playwright", "test", specPath],
       {
         onLine: log,
-        env: { QA_SLOWMO: "0", QA_BASE_URL: baseUrl },
+        env: { QA_SLOWMO: "0", QA_BASE_URL: baseUrl, ...authEnv },
         signal,
       }
     );
@@ -338,5 +372,6 @@ module.exports = {
   REPO_ROOT,
   resolveCli,
   defaultModelForBackend,
+  runtimeAuthEnvironment,
   INCOMPLETE_EXIT_CODE,
 };
