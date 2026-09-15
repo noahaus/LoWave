@@ -378,11 +378,11 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
 
     def add_value(value: Any, *, secret_field: bool = False) -> None:
         if isinstance(value, str):
+            if secret_field and len(value) >= 6:
+                fragments.add(value)
             try:
                 decoded = json.loads(value)
             except (TypeError, ValueError):
-                if secret_field and len(value) >= 6:
-                    fragments.add(value)
                 return
             add_value(decoded)
         elif isinstance(value, dict):

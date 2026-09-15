@@ -55,6 +55,13 @@ def test_canonical_origin_normalizes_case_default_port_and_idna():
         canonical_origin("https://user:pass@app.test")
 
 
+def test_python_accepts_chromium_ipv6_cookie_domain_form():
+    assert validate_storage_state(
+        {"cookies": [{"name": "sid", "value": "secret", "domain": "[::1]", "path": "/"}], "origins": []},
+        "http://[::1]:3000",
+    )["cookies"][0]["name"] == "sid"
+
+
 def test_refine_rejects_auth_origin_override_before_model_or_browser():
     plan = {"workflow": {"base_url": "https://app.test"}, "steps": []}
     with pytest.raises(ValueError, match="must match"):
@@ -218,6 +225,14 @@ def test_authenticated_flash_text_is_scrubbed_before_logs_history_or_assertions(
         "Signed in as person@example.test with COOKIE_SENTINEL",
         state,
     ) == "Signed in as with"
+
+
+def test_json_parsable_cookie_secret_is_still_scrubbed():
+    state = {
+        "cookies": [{"name": "sid", "value": "123456", "domain": "app.test", "path": "/"}],
+        "origins": [],
+    }
+    assert redact_authenticated_text("session 123456", state) == "session"
 
 
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):

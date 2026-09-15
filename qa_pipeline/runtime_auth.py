@@ -11,8 +11,8 @@ from urllib.parse import urlparse
 
 
 def _cookie_applies(domain: str, hostname: str) -> bool:
-    domain = (domain or "").lstrip(".").lower()
-    hostname = hostname.lower()
+    domain = (domain or "").lstrip(".").strip("[]").lower()
+    hostname = hostname.strip("[]").lower()
     return bool(domain) and (hostname == domain or hostname.endswith("." + domain))
 
 
