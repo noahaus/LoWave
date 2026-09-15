@@ -235,6 +235,17 @@ def test_json_parsable_cookie_secret_is_still_scrubbed():
     assert redact_authenticated_text("session 123456", state) == "session"
 
 
+def test_nested_value_inside_session_storage_is_scrubbed():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{"name": "session", "value": '{"value":"ABCDEF123"}'}],
+        }],
+    }
+    assert redact_authenticated_text("token ABCDEF123", state) == "token"
+
+
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):
     secret = "LEAK_SENTINEL_PYTHON_BRIDGE"
     hook = tmp_path / "hook.cjs"

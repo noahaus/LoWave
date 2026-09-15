@@ -384,10 +384,13 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
                 decoded = json.loads(value)
             except (TypeError, ValueError):
                 return
-            add_value(decoded)
+            add_value(decoded, secret_field=secret_field)
         elif isinstance(value, dict):
             for key, child in value.items():
-                add_value(child, secret_field=bool(_SECRET_STORAGE_KEY_RE.search(str(key))))
+                add_value(
+                    child,
+                    secret_field=secret_field or bool(_SECRET_STORAGE_KEY_RE.search(str(key))),
+                )
         elif isinstance(value, list):
             for child in value:
                 add_value(child, secret_field=secret_field)
