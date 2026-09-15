@@ -367,33 +367,41 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
 
 _EMAIL_VALUE_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9_-]{40,}\b")
+_SECRET_STORAGE_KEY_RE = re.compile(
+    r"(?i)(?:^|[_-])(access|refresh|id)?token(?:$|[_-])|password|passcode|secret|credential|authorization|session"
+)
 
 
 def _secret_fragments_from_storage_state(state: dict) -> set[str]:
     """Collect secret-bearing values, never storage keys or origin metadata."""
     fragments: set[str] = set()
 
-    def add_value(value: Any) -> None:
+    def add_value(value: Any, *, secret_field: bool = False) -> None:
         if isinstance(value, str):
-            if len(value) >= 6:
-                fragments.add(value)
             try:
                 decoded = json.loads(value)
             except (TypeError, ValueError):
+                if secret_field and len(value) >= 6:
+                    fragments.add(value)
                 return
             add_value(decoded)
         elif isinstance(value, dict):
-            for child in value.values():
-                add_value(child)
+            for key, child in value.items():
+                add_value(child, secret_field=bool(_SECRET_STORAGE_KEY_RE.search(str(key))))
         elif isinstance(value, list):
             for child in value:
-                add_value(child)
+                add_value(child, secret_field=secret_field)
+        elif secret_field and value is not None:
+            fragments.add(str(value))
 
     for cookie in state.get("cookies", []):
-        add_value(cookie.get("value"))
+        add_value(cookie.get("value"), secret_field=True)
     for origin in state.get("origins", []):
         for item in origin.get("localStorage", []):
-            add_value(item.get("value"))
+            add_value(
+                item.get("value"),
+                secret_field=bool(_SECRET_STORAGE_KEY_RE.search(str(item.get("name") or ""))),
+            )
         for database in origin.get("indexedDB", []):
             for store in database.get("stores", []):
                 for record in store.get("records", []):
@@ -401,23 +409,26 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
     return fragments
 
 
+def redact_authenticated_text(value: str, state: dict) -> str:
+    """Remove session secrets and credential-shaped values from runtime text."""
+    secrets = sorted(_secret_fragments_from_storage_state(state), key=len, reverse=True)
+    cleaned = value
+    for secret in secrets:
+        cleaned = cleaned.replace(secret, "")
+    cleaned = _EMAIL_VALUE_RE.sub("", cleaned)
+    cleaned = _TOKEN_VALUE_RE.sub("", cleaned)
+    return " ".join(cleaned.split())
+
+
 def redact_authenticated_dom(elements: list[dict[str, Any]], state: dict) -> list[dict[str, Any]]:
     """Remove signed-in values before snapshots reach logs, models, or plans."""
-    secrets = sorted(_secret_fragments_from_storage_state(state), key=len, reverse=True)
-
-    def scrub(value: Any) -> Any:
-        if not isinstance(value, str):
-            return value
-        cleaned = value
-        for secret in secrets:
-            cleaned = cleaned.replace(secret, "")
-        cleaned = _EMAIL_VALUE_RE.sub("", cleaned)
-        cleaned = _TOKEN_VALUE_RE.sub("", cleaned)
-        return " ".join(cleaned.split())
 
     safe: list[dict[str, Any]] = []
     for source in elements:
-        item = {key: scrub(value) for key, value in source.items()}
+        item = {
+            key: redact_authenticated_text(value, state) if isinstance(value, str) else value
+            for key, value in source.items()
+        }
         tag = str(item.get("tag") or "").lower()
         input_type = str(item.get("type") or "").lower()
         if tag in {"input", "textarea", "select"} and input_type not in {"button", "submit", "reset"}:
@@ -595,7 +606,12 @@ async def wait_for_stable_page(page: Page, *, timeout_ms: int = 15000) -> None:
     await page.wait_for_timeout(150)
 
 
-async def wait_for_ui_settle(page: Page, *, watch_flash: bool = False) -> Optional[str]:
+async def wait_for_ui_settle(
+    page: Page,
+    *,
+    watch_flash: bool = False,
+    authenticated_state: dict | None = None,
+) -> Optional[str]:
     """After a click/submit, wait out save spinners and capture a toast/status.
 
     Many apps delay the success toast until a modal overlay is removed. A 150ms
@@ -620,6 +636,8 @@ async def wait_for_ui_settle(page: Page, *, watch_flash: bool = False) -> Option
         loc = page.get_by_role("status").or_(page.get_by_role("alert"))
         await loc.first.wait_for(state="visible", timeout=2500)
         flash = " ".join((await loc.first.inner_text()).split())
+        if flash and authenticated_state is not None:
+            flash = redact_authenticated_text(flash, authenticated_state)
         if flash:
             log(f"  Captured flash/status: {flash!r}", "OK")
     except Exception:
@@ -1552,6 +1570,7 @@ async def refine(
                         watch_flash=bool(
                             _SUBMITISH.search(f"{step.locator_value or ''} {step.value or ''}")
                         ),
+                        authenticated_state=storage_state if auth_hook else None,
                     )
                     if flash:
                         last_flash = flash

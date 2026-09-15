@@ -4,7 +4,7 @@ const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 
 function cookieApplies(cookie, hostname) {
-  const domain = String(cookie.domain || "").replace(/^\./, "").toLowerCase();
+  const domain = String(cookie.domain || "").replace(/^\./, "").replace(/^\[|\]$/g, "").toLowerCase();
   const host = String(hostname).replace(/^\[|\]$/g, "").toLowerCase();
   return domain && (host === domain || host.endsWith(`.${domain}`));
 }
@@ -50,7 +50,7 @@ function killTree(child, signal = "SIGTERM") {
 }
 
 function stop(child) {
-  if (!child?.pid || (process.platform === "win32" && child.exitCode != null)) return null;
+  if (!child?.pid) return null;
   killTree(child, "SIGTERM");
   const timer = setTimeout(() => killTree(child, "SIGKILL"), 500);
   timer.unref();

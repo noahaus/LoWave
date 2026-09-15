@@ -20,7 +20,7 @@ test("storage state rejects cookies that cannot apply to the bound origin", () =
 
 test("IPv6 cookie domains use the same hostname form as the bound origin", () => {
   assert.doesNotThrow(() => validateStorageState(
-    { cookies: [{ name: "sid", value: "secret", domain: "::1", path: "/" }], origins: [] },
+    { cookies: [{ name: "sid", value: "secret", domain: "[::1]", path: "/" }], origins: [] },
     "http://[::1]:3000",
   ));
 });

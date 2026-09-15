@@ -8,7 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin, validate_storage_state
-from qa_pipeline.refine_plan import refine, redact_authenticated_dom
+from qa_pipeline.refine_plan import refine, redact_authenticated_dom, redact_authenticated_text
 from qa_pipeline import config
 from qa_pipeline import parse_steps
 import asyncio
@@ -192,6 +192,32 @@ def test_authenticated_dom_redacts_values_and_storage_secrets_before_logs_or_mod
     assert "COOKIE_SENTINEL" not in serialized
     assert redacted[0]["label"] == "Search"
     assert redacted[0]["index"] == 0
+
+
+def test_authenticated_redaction_keeps_ordinary_stored_app_content():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{"name": "draft", "value": "Quarterly plan"}],
+        }],
+    }
+    redacted = redact_authenticated_dom(
+        [{"index": 0, "tag": "button", "text": "Open Quarterly plan"}],
+        state,
+    )
+    assert redacted[0]["text"] == "Open Quarterly plan"
+
+
+def test_authenticated_flash_text_is_scrubbed_before_logs_history_or_assertions():
+    state = {
+        "cookies": [{"name": "sid", "value": "COOKIE_SENTINEL", "domain": "app.test", "path": "/"}],
+        "origins": [],
+    }
+    assert redact_authenticated_text(
+        "Signed in as person@example.test with COOKIE_SENTINEL",
+        state,
+    ) == "Signed in as with"
 
 
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):
