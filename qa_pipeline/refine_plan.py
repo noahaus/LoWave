@@ -44,6 +44,7 @@ from pathlib import Path
 import json
 import re
 from typing import Any, Literal, Optional
+from urllib.parse import unquote
 
 from pydantic import BaseModel, Field
 from playwright.async_api import async_playwright, expect, Page, Locator, Error as PlaywrightError
@@ -418,7 +419,11 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
                 return
 
             if isinstance(decoded, (dict, list)):
-                add_value(decoded, secret_context=secret_context, direct=False)
+                add_value(
+                    decoded,
+                    secret_context=secret_context,
+                    direct=isinstance(decoded, list) and direct,
+                )
             elif isinstance(decoded, str):
                 minimum = 4 if secret_context in {"value", "auth"} else 6
                 if secret_context in {"value", "auth", "session"} and direct and len(decoded) >= minimum:
@@ -432,26 +437,33 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
                 key_context = _secret_storage_context(key)
                 normalized_key = re.sub(r"[^a-zA-Z0-9]+", "_", str(key)).strip("_").lower()
                 child_context = key_context
+                child_direct = key_context is not None
                 if (
                     child_context is None
                     and secret_context in {"auth", "session"}
                     and normalized_key in {"email", "username", "value"}
                 ):
                     child_context = "value"
+                    child_direct = True
                 elif (
                     child_context is None
                     and secret_context in {"auth", "session"}
                     and isinstance(child, (dict, list))
                 ):
                     child_context = secret_context
+                    child_direct = False
                 add_value(
                     child,
                     secret_context=child_context,
-                    direct=child_context is not None,
+                    direct=child_direct,
                 )
         elif isinstance(value, list):
             for child in value:
-                add_value(child, secret_context=secret_context, direct=True)
+                add_value(
+                    child,
+                    secret_context=secret_context if direct else None,
+                    direct=True,
+                )
         elif (
             secret_context == "value"
             and direct
@@ -462,9 +474,19 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
             if len(rendered) >= 4:
                 fragments.add(rendered)
 
+    cookie_chunks: dict[str, list[tuple[int, str]]] = {}
     for cookie in state.get("cookies", []):
-        cookie_context = _secret_storage_context(cookie.get("name") or "", cookie=True)
+        cookie_name = str(cookie.get("name") or "")
+        cookie_context = _secret_storage_context(cookie_name, cookie=True)
         add_value(cookie.get("value"), secret_context=cookie_context)
+        chunk = re.match(r"^(.*?)[._-](\d+)$", cookie_name)
+        if chunk and cookie_context is not None and isinstance(cookie.get("value"), str):
+            cookie_chunks.setdefault(chunk.group(1), []).append(
+                (int(chunk.group(2)), cookie["value"])
+            )
+    for chunks in cookie_chunks.values():
+        if len(chunks) > 1:
+            fragments.add("".join(value for _, value in sorted(chunks)))
     for origin in state.get("origins", []):
         for item in origin.get("localStorage", []):
             add_value(
@@ -510,6 +532,11 @@ def redact_authenticated_text(value: str, state: dict) -> str:
         )
     cleaned = _TOKEN_VALUE_RE.sub("", cleaned)
     return " ".join(cleaned.split())
+
+
+def redact_authenticated_url(value: str, state: dict) -> str:
+    """Make diagnostic URLs safe even when a secret is percent-encoded."""
+    return redact_authenticated_text(unquote(value), state)
 
 
 def redact_authenticated_dom(elements: list[dict[str, Any]], state: dict) -> list[dict[str, Any]]:
@@ -587,7 +614,7 @@ async def describe_block_page(
     """Return a reason if the tab is a captcha/interstitial instead of the app."""
     url = page.url or ""
     safe_url = (
-        redact_authenticated_text(url, authenticated_state)
+        redact_authenticated_url(url, authenticated_state)
         if authenticated_state is not None
         else url
     )
@@ -617,7 +644,7 @@ async def wait_for_app_page(
         return
     log(f"  Bot-check / interstitial detected: {reason}", "WARN")
     safe_url = (
-        redact_authenticated_text(page.url or "", authenticated_state)
+        redact_authenticated_url(page.url or "", authenticated_state)
         if authenticated_state is not None
         else page.url
     )
@@ -766,7 +793,12 @@ async def snapshot_interactive_dom(page: Page, authenticated_state: dict | None 
     for attempt in range(1, 4):
         await wait_for_stable_page(page)
         try:
-            log(f"Snapshotting interactive DOM on: {page.url}")
+            snapshot_url = (
+                redact_authenticated_url(page.url or "", authenticated_state)
+                if authenticated_state is not None
+                else page.url
+            )
+            log(f"Snapshotting interactive DOM on: {snapshot_url}")
             elements = await page.evaluate(_EXTRACT_JS)
             if len(elements) < 8:
                 log(f"  Sparse snapshot ({len(elements)}) — waiting for more UI", "WARN")
@@ -1545,9 +1577,19 @@ async def refine(
     async with async_playwright() as p:
         storage_state = acquire_storage_state(auth_hook, start_url) if auth_hook else None
         browser, context, page = await launch_browser_page(p, headless=headless, storage_state=storage_state)
-        log(f"Navigating to start URL: {start_url}")
+        safe_start_url = (
+            redact_authenticated_url(start_url, storage_state)
+            if auth_hook
+            else start_url
+        )
+        log(f"Navigating to start URL: {safe_start_url}")
         await page.goto(start_url)
-        log(f"Page loaded: {page.url!r}", "OK")
+        loaded_url = (
+            redact_authenticated_url(page.url or "", storage_state)
+            if auth_hook
+            else page.url
+        )
+        log(f"Page loaded: {loaded_url!r}", "OK")
 
         stop_flow = False
         total = len(fuzzy_steps)
@@ -1658,9 +1700,14 @@ async def refine(
                         )
                         await page.wait_for_timeout(1000)
                         continue
+                    current_url = (
+                        redact_authenticated_url(page.url or "", storage_state)
+                        if auth_hook
+                        else page.url
+                    )
                     step.notes = (
                         f"⚠️ FAILED after {attempt} attempts: target {step.locator_value!r} "
-                        f"is not in the live DOM (page {page.url}). "
+                        f"is not in the live DOM (page {current_url}). "
                         + (step.notes or "")
                     )
                     step.confidence = min(step.confidence, 0.2)

@@ -13,6 +13,7 @@ from qa_pipeline.refine_plan import (
     refine,
     redact_authenticated_dom,
     redact_authenticated_text,
+    redact_authenticated_url,
     wait_for_app_page,
 )
 from qa_pipeline import config
@@ -296,6 +297,20 @@ def test_common_session_cookie_values_are_scrubbed(cookie_name):
     assert redact_authenticated_text("Welcome SESSION_COOKIE_123", state) == "Welcome"
 
 
+def test_chunked_session_cookie_is_redacted_after_browser_reassembles_it():
+    state = {
+        "cookies": [
+            {"name": "sb-project-auth-token.0", "value": "PART_ONE_123", "domain": "app.test", "path": "/"},
+            {"name": "sb-project-auth-token.1", "value": "PART_TWO_456", "domain": "app.test", "path": "/"},
+        ],
+        "origins": [],
+    }
+    assert redact_authenticated_text(
+        "Token PART_ONE_123PART_TWO_456",
+        state,
+    ) == "Token"
+
+
 def test_json_parsable_cookie_secret_is_still_scrubbed():
     state = {
         "cookies": [{"name": "sid", "value": "123456", "domain": "app.test", "path": "/"}],
@@ -450,6 +465,23 @@ def test_session_objects_do_not_hide_ordinary_page_labels():
     ) == "Open Journal Settings"
 
 
+def test_session_role_lists_do_not_hide_ordinary_page_labels():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "session",
+                "value": '{"roles":["Administrator","Reviewer"],"value":"SESSION_SECRET_123"}',
+            }],
+        }],
+    }
+    assert redact_authenticated_text(
+        "Administrator Reviewer SESSION_SECRET_123",
+        state,
+    ) == "Administrator Reviewer"
+
+
 def test_bearer_copy_is_preserved_but_long_bearer_credentials_are_scrubbed():
     assert redact_authenticated_text(
         "The bearer shipped. Bearer VERY_LONG_SECRET_TOKEN_123",
@@ -532,6 +564,23 @@ def test_block_page_error_never_reintroduces_a_secret_from_the_url():
     with pytest.raises(RuntimeError) as captured:
         asyncio.run(wait_for_app_page(Page(), headless=True, authenticated_state=state))
     assert "SESSION_SECRET_123" not in str(captured.value)
+
+
+def test_url_redaction_decodes_escaped_session_values_before_logging():
+    state = {
+        "cookies": [{
+            "name": "sessionid",
+            "value": "SESSION+SECRET/123=",
+            "domain": "app.test",
+            "path": "/",
+        }],
+        "origins": [],
+    }
+    safe = redact_authenticated_url(
+        "https://app.test/callback?token=SESSION%2BSECRET%2F123%3D",
+        state,
+    )
+    assert "SESSION" not in safe
 
 
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):
