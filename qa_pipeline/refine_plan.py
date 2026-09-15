@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 from pathlib import Path
 import json
 import re
@@ -378,6 +379,7 @@ def _secret_storage_context(key: Any, *, cookie: bool = False) -> str | None:
         normalized in {"sess", "sessionid", "phpsessid", "jsessionid", "asp_net_sessionid"}
         or normalized.endswith("_session")
         or normalized.endswith("_sess")
+        or re.search(r"(?:^|_)(?:auth|token|jwt|csrf|clearance)(?:_|$)", normalized)
     ):
         return "session"
     if re.search(
@@ -387,10 +389,10 @@ def _secret_storage_context(key: Any, *, cookie: bool = False) -> str | None:
     ):
         return "value"
     if (
-        normalized == "auth"
-        or normalized.startswith("auth_")
-        or normalized.endswith("_auth")
-        or "_auth_" in normalized
+        normalized in {"auth", "auth_cache", "auth_state", "authentication", "authentication_cache"}
+        or normalized.endswith("_auth_cache")
+        or normalized.endswith("_auth_state")
+        or re.search(r"(?:^|_)auth_user(?:_|$)", normalized)
     ):
         return "auth"
     return None
@@ -407,6 +409,26 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
         direct: bool = True,
     ) -> None:
         if isinstance(value, str):
+            unquoted_value = unquote(value)
+            if unquoted_value != value:
+                add_value(
+                    unquoted_value,
+                    secret_context=secret_context,
+                    direct=direct,
+                )
+            if value.startswith("base64-"):
+                encoded = value.removeprefix("base64-")
+                try:
+                    padding = "=" * (-len(encoded) % 4)
+                    decoded_value = base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    pass
+                else:
+                    add_value(
+                        decoded_value,
+                        secret_context=secret_context,
+                        direct=direct,
+                    )
             try:
                 decoded = json.loads(value)
             except (TypeError, ValueError):
@@ -486,7 +508,10 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
             )
     for chunks in cookie_chunks.values():
         if len(chunks) > 1:
-            fragments.add("".join(value for _, value in sorted(chunks)))
+            add_value(
+                "".join(value for _, value in sorted(chunks)),
+                secret_context="session",
+            )
     for origin in state.get("origins", []):
         for item in origin.get("localStorage", []):
             add_value(

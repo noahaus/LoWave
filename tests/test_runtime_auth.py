@@ -1,4 +1,5 @@
 import pytest
+import base64
 import json
 import os
 import signal
@@ -309,6 +310,61 @@ def test_chunked_session_cookie_is_redacted_after_browser_reassembles_it():
         "Token PART_ONE_123PART_TWO_456",
         state,
     ) == "Token"
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_supabase_base64_cookie_payload_tokens_are_scrubbed(chunked):
+    payload = json.dumps({
+        "access_token": "HEADER.PAYLOAD.SIGNATURE",
+        "refresh_token": "REFRESH_SECRET_123",
+    }).encode()
+    encoded = "base64-" + base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    if chunked:
+        midpoint = len(encoded) // 2
+        cookies = [
+            {"name": "sb-project-auth-token.0", "value": encoded[:midpoint], "domain": "app.test", "path": "/"},
+            {"name": "sb-project-auth-token.1", "value": encoded[midpoint:], "domain": "app.test", "path": "/"},
+        ]
+    else:
+        cookies = [{
+            "name": "sb-project-auth-token",
+            "value": encoded,
+            "domain": "app.test",
+            "path": "/",
+        }]
+    state = {"cookies": cookies, "origins": []}
+    assert redact_authenticated_text(
+        "Tokens HEADER.PAYLOAD.SIGNATURE REFRESH_SECRET_123",
+        state,
+    ) == "Tokens"
+
+
+def test_percent_encoded_session_json_tokens_are_scrubbed():
+    state = {
+        "cookies": [{
+            "name": "sessionid",
+            "value": "%7B%22access_token%22%3A%22ENCODED_SECRET_123%22%7D",
+            "domain": "app.test",
+            "path": "/",
+        }],
+        "origins": [],
+    }
+    assert redact_authenticated_text("Token ENCODED_SECRET_123", state) == "Token"
+
+
+def test_auth_status_metadata_does_not_hide_ordinary_page_copy():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [
+                {"name": "authReady", "value": "true"},
+                {"name": "authExpiresAt", "value": "1726000000"},
+            ],
+        }],
+    }
+    text = "Authentication is true for build 1726000000"
+    assert redact_authenticated_text(text, state) == text
 
 
 def test_json_parsable_cookie_secret_is_still_scrubbed():
