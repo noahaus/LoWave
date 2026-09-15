@@ -58,15 +58,11 @@ def base_url(cli_value: str | None = None) -> str:
 
 def username(cli_value: str | None = None) -> str | None:
     """Login username, if the workflow needs one. None means 'not configured'."""
-    if os.environ.get("QA_AUTH_HOOK"):
-        return None
     return _resolve(cli_value, "QA_USERNAME", None)
 
 
 def password(cli_value: str | None = None) -> str | None:
     """Login password, if the workflow needs one. None means 'not configured'."""
-    if os.environ.get("QA_AUTH_HOOK"):
-        return None
     return _resolve(cli_value, "QA_PASSWORD", None)
 
 

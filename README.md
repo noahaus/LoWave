@@ -95,6 +95,7 @@ module.exports.authenticate = async ({ page, baseURL }) => {
 ```
 
 ```bash
+qa-parse steps.txt action_plan.json --runtime-auth
 qa-refine --plan action_plan.json --out refined_action_plan.json \
   --auth-hook "$PWD/auth-hook.cjs"
 qa-generate refined_action_plan.json tests/generated.spec.ts --runtime-auth

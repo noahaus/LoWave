@@ -2,6 +2,7 @@ import pytest
 import json
 import os
 import signal
+import sys
 import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -9,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin, validate_storage_state
 from qa_pipeline.refine_plan import refine
 from qa_pipeline import config
-from qa_pipeline.parse_steps import build_system_prompt
+from qa_pipeline import parse_steps
 import asyncio
 from qa_pipeline.generate import generate
 
@@ -67,13 +68,35 @@ def test_refine_authenticated_preflight_checks_hook_path_without_model_or_browse
         asyncio.run(refine(plan, "https://app.test/path", "ollama", None, True, 0, .5, str(missing)))
 
 
-def test_runtime_auth_blocks_dotenv_credentials_from_parser_prompt(monkeypatch):
+def test_parse_runtime_auth_blocks_environment_credentials_from_prompt_and_plan(tmp_path, monkeypatch):
+    steps = tmp_path / "steps.txt"
+    output = tmp_path / "plan.json"
+    steps.write_text("1. Open the app")
     monkeypatch.setenv("QA_AUTH_HOOK", "/trusted/hook.cjs")
     monkeypatch.setenv("QA_USERNAME", "LEAK_SENTINEL_USER")
     monkeypatch.setenv("QA_PASSWORD", "LEAK_SENTINEL_PASSWORD")
-    prompt = build_system_prompt("https://app.test", config.username(), config.password())
+    captured = {}
+
+    class FakeResponse:
+        content = json.dumps({"workflow": {"title": "safe", "base_url": "https://app.test"}, "steps": [], "metadata": {}})
+
+    class FakeLLM:
+        def invoke(self, messages):
+            captured["messages"] = messages
+            return FakeResponse()
+
+    monkeypatch.setattr(parse_steps, "build_llm", lambda *_args, **_kwargs: FakeLLM())
+    monkeypatch.setattr(sys, "argv", ["qa-parse", str(steps), str(output), "--base-url", "https://app.test", "--runtime-auth"])
+    parse_steps.main()
+    prompt = "\n".join(str(message.content) for message in captured["messages"])
     assert "LEAK_SENTINEL" not in prompt
-    assert "credentials exactly as written" in prompt
+    assert "LEAK_SENTINEL" not in output.read_text()
+
+
+def test_ambient_auth_hook_does_not_override_explicit_legacy_credentials(monkeypatch):
+    monkeypatch.setenv("QA_AUTH_HOOK", "/trusted/hook.cjs")
+    assert config.username("demo@example.test") == "demo@example.test"
+    assert config.password("test1234") == "test1234"
 
 
 def test_generator_uses_runtime_fixture_only_when_explicit(tmp_path, monkeypatch):

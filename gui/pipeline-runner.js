@@ -300,6 +300,7 @@ async function runPipeline(opts) {
       "--base-url",
       baseUrl,
       ...llmArgs,
+      ...(authHook ? ["--runtime-auth"] : []),
     ];
     if (username) args.push("--username", username);
     if (password) args.push("--password", password);

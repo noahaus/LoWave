@@ -221,12 +221,23 @@ def main():
                     help="login username for the workflow (default: $QA_USERNAME)")
     ap.add_argument("--password", default=None,
                     help="login password for the workflow (default: $QA_PASSWORD)")
+    ap.add_argument(
+        "--runtime-auth",
+        action="store_true",
+        help="exclude legacy credentials from the model prompt and saved plan",
+    )
     args = ap.parse_args()
 
     backend = config.backend(args.backend)
     base_url = config.base_url(args.base_url)
-    username = config.username(args.username)
-    password = config.password(args.password)
+    if args.runtime_auth:
+        if args.username is not None or args.password is not None:
+            ap.error("--runtime-auth cannot be combined with --username or --password")
+        username = None
+        password = None
+    else:
+        username = config.username(args.username)
+        password = config.password(args.password)
 
     if not args.steps.exists():
         sys.exit(f"{YELLOW}ERROR: steps file not found at {args.steps}{RESET}")
