@@ -5,7 +5,7 @@ const { pathToFileURL } = require("node:url");
 
 function cookieApplies(cookie, hostname) {
   const domain = String(cookie.domain || "").replace(/^\./, "").toLowerCase();
-  const host = hostname.toLowerCase();
+  const host = String(hostname).replace(/^\[|\]$/g, "").toLowerCase();
   return domain && (host === domain || host.endsWith(`.${domain}`));
 }
 
@@ -34,10 +34,25 @@ function parseAuthOutput(raw, baseURL) {
   catch { throw new Error("invalid authentication state from runtime hook"); }
 }
 
+function treeKillCommand(pid, platform = process.platform) {
+  if (platform !== "win32") return null;
+  return { command: "taskkill", args: ["/pid", String(pid), "/T", "/F"] };
+}
+
+function killTree(child, signal = "SIGTERM") {
+  if (!child?.pid) return;
+  const command = treeKillCommand(child.pid);
+  if (command) {
+    try { spawn(command.command, command.args, { stdio: "ignore", windowsHide: true }).unref(); } catch {}
+    return;
+  }
+  try { process.kill(-child.pid, signal); } catch {}
+}
+
 function stop(child) {
   if (!child?.pid || (process.platform === "win32" && child.exitCode != null)) return null;
-  try { process.platform === "win32" ? child.kill("SIGTERM") : process.kill(-child.pid, "SIGTERM"); } catch {}
-  const timer = setTimeout(() => { try { process.platform === "win32" ? child.kill("SIGKILL") : process.kill(-child.pid, "SIGKILL"); } catch {} }, 500);
+  killTree(child, "SIGTERM");
+  const timer = setTimeout(() => killTree(child, "SIGKILL"), 500);
   timer.unref();
   return timer;
 }
@@ -45,6 +60,12 @@ function stop(child) {
 function runAuthHook({ hookPath, baseURL, timeoutMs = 30000, maxBytes = 1024 * 1024, signal }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error("runtime authentication cancelled"));
+    let request;
+    try {
+      request = { version: 1, baseURL, origin: canonicalOrigin(baseURL) };
+    } catch {
+      return reject(new Error("invalid bound origin"));
+    }
     const child = spawn(process.execPath, [__filename, hookPath], {
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "ignore", "ipc"],
@@ -78,7 +99,7 @@ function runAuthHook({ hookPath, baseURL, timeoutMs = 30000, maxBytes = 1024 * 1
       try { resolve(parseAuthOutput(Buffer.concat(chunks), baseURL)); }
       catch (err) { reject(err); }
     });
-    child.stdin.end(JSON.stringify({ version: 1, baseURL, origin: canonicalOrigin(baseURL) }));
+    child.stdin.end(JSON.stringify(request));
   });
 }
 
@@ -122,4 +143,4 @@ async function childMain(hookPath) {
 }
 
 if (require.main === module) childMain(process.argv[2]).catch(() => process.exit(1));
-module.exports = { canonicalOrigin, validateStorageState, parseAuthOutput, runAuthHook };
+module.exports = { canonicalOrigin, validateStorageState, parseAuthOutput, runAuthHook, treeKillCommand };

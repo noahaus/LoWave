@@ -8,7 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin, validate_storage_state
-from qa_pipeline.refine_plan import refine
+from qa_pipeline.refine_plan import refine, redact_authenticated_dom
 from qa_pipeline import config
 from qa_pipeline import parse_steps
 import asyncio
@@ -61,6 +61,20 @@ def test_refine_rejects_auth_origin_override_before_model_or_browser():
         asyncio.run(refine(plan, "https://other.test", "ollama", None, True, 0, .5, "/hook.cjs"))
 
 
+def test_refine_runtime_auth_rejects_userinfo_before_logging(tmp_path, capsys):
+    hook = tmp_path / "hook.cjs"
+    hook.write_text("exports.authenticate=async()=>{};")
+    plan = {
+        "workflow": {"base_url": "https://alice:LEAK_SENTINEL@app.test"},
+        "steps": [],
+    }
+    with pytest.raises(ValueError, match="invalid bound origin"):
+        asyncio.run(refine(plan, None, "ollama", None, True, 0, .5, str(hook)))
+    captured = capsys.readouterr()
+    assert "LEAK_SENTINEL" not in captured.out
+    assert "LEAK_SENTINEL" not in captured.err
+
+
 def test_refine_authenticated_preflight_checks_hook_path_without_model_or_browser(tmp_path):
     plan = {"workflow": {"base_url": "https://app.test"}, "steps": []}
     missing = tmp_path / "missing-hook.cjs"
@@ -91,6 +105,23 @@ def test_parse_runtime_auth_blocks_environment_credentials_from_prompt_and_plan(
     prompt = "\n".join(str(message.content) for message in captured["messages"])
     assert "LEAK_SENTINEL" not in prompt
     assert "LEAK_SENTINEL" not in output.read_text()
+
+
+def test_parse_runtime_auth_rejects_userinfo_url_before_print_or_model(tmp_path, monkeypatch, capsys):
+    steps = tmp_path / "steps.txt"
+    output = tmp_path / "plan.json"
+    steps.write_text("1. Open the app")
+    monkeypatch.setenv("QA_BASE_URL", "https://alice:LEAK_SENTINEL@app.test")
+    monkeypatch.setattr(
+        parse_steps,
+        "build_llm",
+        lambda *_args, **_kwargs: pytest.fail("model must not be called"),
+    )
+    monkeypatch.setattr(sys, "argv", ["qa-parse", str(steps), str(output), "--runtime-auth"])
+    with pytest.raises(SystemExit):
+        parse_steps.main()
+    assert "LEAK_SENTINEL" not in capsys.readouterr().out
+    assert not output.exists()
 
 
 def test_ambient_auth_hook_does_not_override_explicit_legacy_credentials(monkeypatch):
@@ -129,6 +160,38 @@ def test_generator_fails_before_writing_when_runtime_fixture_is_missing(tmp_path
     with pytest.raises(RuntimeError, match="runtime authentication fixture"):
         generate(plan, out, runtime_auth=True)
     assert not out.exists()
+
+
+def test_generator_runtime_auth_rejects_userinfo_url_before_print_or_write(tmp_path, capsys):
+    plan = tmp_path / "plan.json"
+    out = tmp_path / "auth.spec.ts"
+    plan.write_text(json.dumps({
+        "workflow": {"title": "auth", "base_url": "https://alice:LEAK_SENTINEL@app.test"},
+        "steps": [],
+    }))
+    with pytest.raises(ValueError, match="invalid bound origin"):
+        generate(plan, out, runtime_auth=True)
+    assert "LEAK_SENTINEL" not in capsys.readouterr().out
+    assert not out.exists()
+
+
+def test_authenticated_dom_redacts_values_and_storage_secrets_before_logs_or_model():
+    elements = [
+        {"index": 0, "tag": "input", "type": "text", "text": "typed-secret", "label": "Search"},
+        {"index": 1, "tag": "button", "role": "button", "title": "signed-in@example.test", "text": "Profile"},
+        {"index": 2, "tag": "button", "role": "button", "text": "Use token COOKIE_SENTINEL now"},
+    ]
+    state = {
+        "cookies": [{"name": "sid", "value": "COOKIE_SENTINEL", "domain": "app.test", "path": "/"}],
+        "origins": [],
+    }
+    redacted = redact_authenticated_dom(elements, state)
+    serialized = json.dumps(redacted)
+    assert "typed-secret" not in serialized
+    assert "signed-in@example.test" not in serialized
+    assert "COOKIE_SENTINEL" not in serialized
+    assert redacted[0]["label"] == "Search"
+    assert redacted[0]["index"] == 0
 
 
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):

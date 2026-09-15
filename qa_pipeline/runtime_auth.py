@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import selectors
 import signal
 import subprocess
 import threading
@@ -64,36 +63,59 @@ def acquire_storage_state(hook_path: str, base_url: str, *, timeout_s: float = 3
         stderr=subprocess.DEVNULL,
         # A dedicated group permits bounded TERM/KILL cleanup of hook children.
         start_new_session=os.name != "nt",
+        creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0),
     )
-    try:
-        assert proc.stdin is not None and proc.stdout is not None
-        proc.stdin.write(json.dumps(request).encode())
-        proc.stdin.close()
-        selected = selectors.DefaultSelector()
-        selected.register(proc.stdout, selectors.EVENT_READ)
-    except BaseException:
-        try:
-            if os.name != "nt":
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except ProcessLookupError:
-            pass
-        proc.wait(timeout=2)
-        raise RuntimeError("runtime authentication helper setup failed") from None
-    chunks: list[bytes] = []
-    size = 0
-    deadline = time.monotonic() + timeout_s
-    old_handlers = {}
+
     def stop_tree(force: bool = False) -> None:
         sig = signal.SIGKILL if force else signal.SIGTERM
         try:
             if os.name != "nt":
                 os.killpg(proc.pid, sig)
-            elif proc.poll() is None:
-                proc.kill() if force else proc.terminate()
+            else:
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=2,
+                )
         except ProcessLookupError:
             pass
+        except (OSError, subprocess.SubprocessError):
+            if proc.poll() is None:
+                proc.kill() if force else proc.terminate()
+
+    try:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(json.dumps(request).encode())
+        proc.stdin.close()
+    except BaseException:
+        stop_tree(force=True)
+        proc.wait(timeout=2)
+        raise RuntimeError("runtime authentication helper setup failed") from None
+
+    chunks: list[bytes] = []
+    reader_failure: list[BaseException] = []
+    reader_done = threading.Event()
+
+    def read_output() -> None:
+        size = 0
+        try:
+            assert proc.stdout is not None
+            while chunk := proc.stdout.read(65536):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError("runtime authentication exceeded output limit")
+                chunks.append(chunk)
+        except BaseException as exc:
+            reader_failure.append(exc)
+        finally:
+            reader_done.set()
+
+    reader = threading.Thread(target=read_output, name="qa-runtime-auth-output", daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout_s
+    old_handlers = {}
     def relay(signum, _frame):
         stop_tree()
         raise KeyboardInterrupt(f"runtime authentication interrupted by signal {signum}")
@@ -102,21 +124,18 @@ def acquire_storage_state(hook_path: str, base_url: str, *, timeout_s: float = 3
             old_handlers[sig] = signal.getsignal(sig)
             signal.signal(sig, relay)
     try:
-        while True:
+        while not reader_done.wait(0.05):
+            if reader_failure:
+                raise reader_failure[0]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("runtime authentication timed out")
-            events = selected.select(min(remaining, 0.25))
-            if events:
-                chunk = os.read(proc.stdout.fileno(), 65536)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_bytes:
-                    raise ValueError("runtime authentication exceeded output limit")
-                chunks.append(chunk)
-            elif proc.poll() is not None:
-                break
+            if proc.poll() is not None:
+                # A hook descendant may still hold stdout. Kill the helper tree
+                # so the reader can observe EOF instead of hanging indefinitely.
+                stop_tree(force=True)
+        if reader_failure:
+            raise reader_failure[0]
         if proc.wait(timeout=1) != 0:
             raise RuntimeError("runtime authentication hook failed")
         state = decode_storage_state(b"".join(chunks), base_url)
@@ -135,6 +154,8 @@ def acquire_storage_state(hook_path: str, base_url: str, *, timeout_s: float = 3
             pass
         raise
     finally:
-        selected.close()
+        if proc.poll() is None:
+            stop_tree(force=True)
+        reader.join(timeout=2)
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)

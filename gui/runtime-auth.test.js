@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
-const { validateStorageState, parseAuthOutput, runAuthHook } = require("../runtime/auth-hook-runner.cjs");
+const { validateStorageState, parseAuthOutput, runAuthHook, treeKillCommand } = require("../runtime/auth-hook-runner.cjs");
 const { runCommand, runPipeline, runtimeAuthEnvironment } = require("./pipeline-runner");
 
 test("storage state rejects cross-origin local storage", () => {
@@ -16,6 +16,29 @@ test("storage state rejects cross-origin local storage", () => {
 
 test("storage state rejects cookies that cannot apply to the bound origin", () => {
   assert.throws(() => validateStorageState({ cookies: [{ name: "sid", value: "secret", domain: "evil.test", path: "/" }], origins: [] }, "https://app.test"), /cookie domain/);
+});
+
+test("IPv6 cookie domains use the same hostname form as the bound origin", () => {
+  assert.doesNotThrow(() => validateStorageState(
+    { cookies: [{ name: "sid", value: "secret", domain: "::1", path: "/" }], origins: [] },
+    "http://[::1]:3000",
+  ));
+});
+
+test("Windows cleanup uses taskkill for the complete helper tree", () => {
+  assert.deepEqual(treeKillCommand(4321, "win32"), {
+    command: "taskkill",
+    args: ["/pid", "4321", "/T", "/F"],
+  });
+});
+
+test("malformed runtime-auth URL fails promptly before spawning a helper", async () => {
+  const started = Date.now();
+  await assert.rejects(
+    runAuthHook({ hookPath: "/does/not/matter.cjs", baseURL: "https://user:LEAK_SENTINEL@app.test" }),
+    /invalid bound origin/,
+  );
+  assert.ok(Date.now() - started < 1000);
 });
 
 test("malformed helper output fails without echoing it", () => {

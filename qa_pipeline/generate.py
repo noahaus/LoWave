@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 
 from qa_pipeline import config
+from qa_pipeline.runtime_auth import canonical_origin
 
 GREEN, BLUE, YELLOW, DIM, BOLD, RESET = (
     "\033[92m", "\033[94m", "\033[93m", "\033[2m", "\033[1m", "\033[0m"
@@ -578,6 +579,8 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
     base_url = (base_url_override
                 or parsed.get("workflow", {}).get("base_url")
                 or config.base_url(None))
+    if runtime_auth:
+        canonical_origin(base_url)
     title    = parsed.get("workflow", {}).get("title", "workflow")
     steps    = parsed.get("steps", [])
     is_refined = parsed.get("metadata", {}).get("refined", False)

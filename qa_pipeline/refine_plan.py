@@ -365,6 +365,67 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in out.items() if v not in (None, "", [])}
 
 
+_EMAIL_VALUE_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+_TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9_-]{40,}\b")
+
+
+def _secret_fragments_from_storage_state(state: dict) -> set[str]:
+    """Collect secret-bearing values, never storage keys or origin metadata."""
+    fragments: set[str] = set()
+
+    def add_value(value: Any) -> None:
+        if isinstance(value, str):
+            if len(value) >= 6:
+                fragments.add(value)
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError):
+                return
+            add_value(decoded)
+        elif isinstance(value, dict):
+            for child in value.values():
+                add_value(child)
+        elif isinstance(value, list):
+            for child in value:
+                add_value(child)
+
+    for cookie in state.get("cookies", []):
+        add_value(cookie.get("value"))
+    for origin in state.get("origins", []):
+        for item in origin.get("localStorage", []):
+            add_value(item.get("value"))
+        for database in origin.get("indexedDB", []):
+            for store in database.get("stores", []):
+                for record in store.get("records", []):
+                    add_value(record.get("value"))
+    return fragments
+
+
+def redact_authenticated_dom(elements: list[dict[str, Any]], state: dict) -> list[dict[str, Any]]:
+    """Remove signed-in values before snapshots reach logs, models, or plans."""
+    secrets = sorted(_secret_fragments_from_storage_state(state), key=len, reverse=True)
+
+    def scrub(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        cleaned = value
+        for secret in secrets:
+            cleaned = cleaned.replace(secret, "")
+        cleaned = _EMAIL_VALUE_RE.sub("", cleaned)
+        cleaned = _TOKEN_VALUE_RE.sub("", cleaned)
+        return " ".join(cleaned.split())
+
+    safe: list[dict[str, Any]] = []
+    for source in elements:
+        item = {key: scrub(value) for key, value in source.items()}
+        tag = str(item.get("tag") or "").lower()
+        input_type = str(item.get("type") or "").lower()
+        if tag in {"input", "textarea", "select"} and input_type not in {"button", "submit", "reset"}:
+            item["text"] = ""
+        safe.append(item)
+    return safe
+
+
 def select_dom_for_llm(
     dom: list[dict[str, Any]],
     fuzzy: FuzzyStep,
@@ -570,7 +631,7 @@ def _is_flash_assert(fuzzy: FuzzyStep) -> bool:
     return fuzzy.action == "assert" and bool(_FLASH_ASSERT_RE.search(fuzzy.target or ""))
 
 
-async def snapshot_interactive_dom(page: Page) -> list[dict[str, Any]]:
+async def snapshot_interactive_dom(page: Page, authenticated_state: dict | None = None) -> list[dict[str, Any]]:
     last_err: Optional[Exception] = None
     for attempt in range(1, 4):
         await wait_for_stable_page(page)
@@ -581,6 +642,8 @@ async def snapshot_interactive_dom(page: Page) -> list[dict[str, Any]]:
                 log(f"  Sparse snapshot ({len(elements)}) — waiting for more UI", "WARN")
                 await page.wait_for_timeout(2000)
                 elements = await page.evaluate(_EXTRACT_JS)
+            if authenticated_state is not None:
+                elements = redact_authenticated_dom(elements, authenticated_state)
             log(f"DOM snapshot complete — {len(elements)} interactive element(s) found")
             log_snapshot_preview(elements)
             return elements
@@ -1329,15 +1392,17 @@ async def refine(
     confidence_floor: float,
     auth_hook: Optional[str] = None,
 ) -> dict:
-    fuzzy_steps, base_url, warnings = adapt_plan(plan)
-    start_url = start_url or base_url
+    plan_base_url = plan.get("workflow", {}).get("base_url", "")
+    requested_start_url = start_url or plan_base_url
     if auth_hook:
-        if canonical_origin(start_url) != canonical_origin(base_url):
+        if canonical_origin(requested_start_url) != canonical_origin(plan_base_url):
             raise ValueError("runtime authentication start URL must match the plan base URL origin")
         Path(auth_hook).resolve(strict=True)
         runtime_helper = Path(__file__).resolve().parent.parent / "runtime" / "auth-hook-runner.cjs"
         if not runtime_helper.exists():
             raise RuntimeError("runtime authentication requires a source or editable checkout containing runtime/auth-hook-runner.cjs")
+    fuzzy_steps, base_url, warnings = adapt_plan(plan)
+    start_url = start_url or base_url
     chain = build_refiner(backend, model)
 
     refined_steps: list[RefinedStep] = []
@@ -1443,7 +1508,7 @@ async def refine(
                     stop_flow = True
                     break
 
-                dom = await snapshot_interactive_dom(page)
+                dom = await snapshot_interactive_dom(page, storage_state if auth_hook else None)
                 step = await ground_step(chain, fuzzy, dom, history)
 
                 if not grounding_matches_dom(step, dom) and step.action in {"click", "type", "select", "hover", "drag"}:

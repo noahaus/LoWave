@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from qa_pipeline import config
+from qa_pipeline.runtime_auth import canonical_origin
 from qa_pipeline.llm import build_llm
 
 GREEN, BLUE, YELLOW, DIM, BOLD, RESET = (
@@ -231,6 +232,10 @@ def main():
     backend = config.backend(args.backend)
     base_url = config.base_url(args.base_url)
     if args.runtime_auth:
+        try:
+            canonical_origin(base_url)
+        except ValueError:
+            ap.error("--runtime-auth requires an HTTP(S) URL without embedded credentials")
         if args.username is not None or args.password is not None:
             ap.error("--runtime-auth cannot be combined with --username or --password")
         username = None
