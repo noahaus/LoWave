@@ -8,7 +8,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from qa_pipeline.runtime_auth import acquire_storage_state, canonical_origin, validate_storage_state, _stop_process_tree
-from qa_pipeline.refine_plan import refine, redact_authenticated_dom, redact_authenticated_text
+from qa_pipeline.refine_plan import (
+    describe_block_page,
+    refine,
+    redact_authenticated_dom,
+    redact_authenticated_text,
+)
 from qa_pipeline import config
 from qa_pipeline import parse_steps
 import asyncio
@@ -207,7 +212,13 @@ def test_authenticated_dom_redacts_values_and_storage_secrets_before_logs_or_mod
     ]
     state = {
         "cookies": [{"name": "sid", "value": "COOKIE_SENTINEL", "domain": "app.test", "path": "/"}],
-        "origins": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "authCache",
+                "value": '{"email":"signed-in@example.test"}',
+            }],
+        }],
     }
     redacted = redact_authenticated_dom(elements, state)
     serialized = json.dumps(redacted)
@@ -236,12 +247,39 @@ def test_authenticated_redaction_keeps_ordinary_stored_app_content():
 def test_authenticated_flash_text_is_scrubbed_before_logs_history_or_assertions():
     state = {
         "cookies": [{"name": "sid", "value": "COOKIE_SENTINEL", "domain": "app.test", "path": "/"}],
-        "origins": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "authCache",
+                "value": '{"email":"person@example.test"}',
+            }],
+        }],
     }
     assert redact_authenticated_text(
         "Signed in as person@example.test with COOKIE_SENTINEL",
         state,
     ) == "Signed in as with"
+
+
+def test_ordinary_email_copy_is_preserved_when_it_is_not_in_auth_state():
+    assert redact_authenticated_text(
+        "Invite support@example.com for help",
+        {"cookies": [], "origins": []},
+    ) == "Invite support@example.com for help"
+
+
+@pytest.mark.parametrize("cookie_name", ["sessionid", "laravel_session"])
+def test_common_session_cookie_values_are_scrubbed(cookie_name):
+    state = {
+        "cookies": [{
+            "name": cookie_name,
+            "value": "SESSION_COOKIE_123",
+            "domain": "app.test",
+            "path": "/",
+        }],
+        "origins": [],
+    }
+    assert redact_authenticated_text("Welcome SESSION_COOKIE_123", state) == "Welcome"
 
 
 def test_json_parsable_cookie_secret_is_still_scrubbed():
@@ -353,6 +391,82 @@ def test_short_secret_fragments_are_removed_as_whole_values_only():
         }],
     }
     assert redact_authenticated_text("dark darkness", state) == "darkness"
+
+
+def test_session_objects_do_not_hide_ordinary_page_labels():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "session",
+                "value": '{"user":{"name":"Journal","workspace":"Settings"},"value":"SESSION_SECRET_123"}',
+            }],
+        }],
+    }
+    assert redact_authenticated_text(
+        "Open Journal Settings SESSION_SECRET_123",
+        state,
+    ) == "Open Journal Settings"
+
+
+def test_bearer_copy_is_preserved_but_long_bearer_credentials_are_scrubbed():
+    assert redact_authenticated_text(
+        "The bearer shipped. Bearer VERY_LONG_SECRET_TOKEN_123",
+        {"cookies": [], "origins": []},
+    ) == "The bearer shipped."
+
+
+def test_firebase_indexeddb_secret_is_scrubbed_without_scrubbing_ordinary_records():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [],
+            "indexedDB": [
+                {
+                    "name": "firebaseLocalStorageDb",
+                    "stores": [{
+                        "name": "firebaseLocalStorage",
+                        "records": [{"key": "firebase:authUser:test", "value": "FIREBASE_SECRET_123"}],
+                    }],
+                },
+                {
+                    "name": "drafts",
+                    "stores": [{
+                        "name": "pages",
+                        "records": [{"key": 1, "value": "Morning pages"}],
+                    }],
+                },
+            ],
+        }],
+    }
+    assert redact_authenticated_text(
+        "Open Morning pages FIREBASE_SECRET_123",
+        state,
+    ) == "Open Morning pages"
+
+
+def test_block_page_diagnostic_redacts_authenticated_values():
+    class Page:
+        url = "https://app.test/check"
+
+        async def inner_text(self, _selector, *, timeout):
+            assert timeout == 2000
+            return "Verify you are human SESSION_SECRET_123"
+
+    state = {
+        "cookies": [{
+            "name": "sessionid",
+            "value": "SESSION_SECRET_123",
+            "domain": "app.test",
+            "path": "/",
+        }],
+        "origins": [],
+    }
+    reason = asyncio.run(describe_block_page(Page(), authenticated_state=state))
+    assert reason is not None
+    assert "SESSION_SECRET_123" not in reason
 
 
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):

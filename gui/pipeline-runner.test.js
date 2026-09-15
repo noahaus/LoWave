@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const { defaultModelForBackend, runCommand } = require("./pipeline-runner");
+const { defaultModelForBackend, runCommand, stopChild } = require("./pipeline-runner");
 
 
 test("only Ollama receives a hardcoded local model default", () => {
@@ -53,5 +53,47 @@ test("cancelling a command also stops its CLI descendants", { skip: process.plat
     if (descendant) {
       try { process.kill(descendant, "SIGKILL"); } catch {}
     }
+  }
+});
+
+test("cancelling after the leader exits still stops descendants holding stdout", { skip: process.platform === "win32", timeout: 5000 }, async () => {
+  const controller = new AbortController();
+  let descendant;
+  const script = `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'ignore'] });
+    process.stdout.write(String(child.pid) + '\\n');
+  `;
+  try {
+    await assert.rejects(runCommand(process.execPath, ["-e", script], {
+      signal: controller.signal,
+      onLine(line, stream) {
+        if (stream !== "stdout" || !/^\d+$/.test(line.trim())) return;
+        descendant = Number(line.trim());
+        setTimeout(() => controller.abort(), 100);
+      },
+    }), (err) => err.cancelled === true);
+    for (let attempt = 0; attempt < 30; attempt++) {
+      try { process.kill(descendant, 0); }
+      catch (err) { if (err.code === "ESRCH") return; throw err; }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.fail("CLI descendant survived cancellation after its leader exited");
+  } finally {
+    if (descendant) {
+      try { process.kill(descendant, "SIGKILL"); } catch {}
+    }
+  }
+});
+
+test("stopChild signals the process group even after the leader exits", { skip: process.platform === "win32" }, () => {
+  const originalKill = process.kill;
+  const calls = [];
+  process.kill = (pid, signal) => calls.push([pid, signal]);
+  try {
+    stopChild({ killed: false, exitCode: 0, pid: 987654321 });
+    assert.deepEqual(calls[0], [-987654321, "SIGTERM"]);
+  } finally {
+    process.kill = originalKill;
   }
 });

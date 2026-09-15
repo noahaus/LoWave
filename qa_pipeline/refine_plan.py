@@ -365,18 +365,22 @@ def compact_element_for_llm(el: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in out.items() if v not in (None, "", [])}
 
 
-_EMAIL_VALUE_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
-_TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9_-]{40,}\b")
+_TOKEN_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9_-]{40,}\b")
 
 
-def _secret_storage_context(key: Any) -> str | None:
+def _secret_storage_context(key: Any, *, cookie: bool = False) -> str | None:
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).strip("_").lower()
     if normalized in {"session", "auth_session", "user_session"}:
         return "session"
+    if cookie and (
+        normalized in {"sessionid", "phpsessid", "jsessionid", "asp_net_sessionid"}
+        or normalized.endswith("_session")
+    ):
+        return "session"
     if re.search(
         r"(?:^|_)(?:access_token|refresh_token|id_token|auth_token|jwt_token|token|"
-        r"password|passcode|secret|credential|authorization|session_id|sid|api_key|jwt)$",
+        r"password|passcode|secret|credential|authorization|session_id|sid|api_key|jwt|email)$",
         normalized,
     ):
         return "value"
@@ -415,19 +419,18 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
         elif isinstance(value, dict):
             for key, child in value.items():
                 key_context = _secret_storage_context(key)
-                child_context = key_context or ("session" if secret_context == "session" else None)
+                normalized_key = re.sub(r"[^a-zA-Z0-9]+", "_", str(key)).strip("_").lower()
+                child_context = key_context
+                if child_context is None and secret_context == "session" and normalized_key == "value":
+                    child_context = "value"
                 add_value(
                     child,
                     secret_context=child_context,
-                    direct=key_context is not None,
+                    direct=child_context is not None,
                 )
         elif isinstance(value, list):
             for child in value:
-                add_value(
-                    child,
-                    secret_context="session" if secret_context == "session" else None,
-                    direct=False,
-                )
+                add_value(child)
         elif (
             secret_context == "value"
             and direct
@@ -439,7 +442,7 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
                 fragments.add(rendered)
 
     for cookie in state.get("cookies", []):
-        cookie_context = _secret_storage_context(cookie.get("name") or "")
+        cookie_context = _secret_storage_context(cookie.get("name") or "", cookie=True)
         add_value(cookie.get("value"), secret_context=cookie_context)
     for origin in state.get("origins", []):
         for item in origin.get("localStorage", []):
@@ -450,7 +453,27 @@ def _secret_fragments_from_storage_state(state: dict) -> set[str]:
         for database in origin.get("indexedDB", []):
             for store in database.get("stores", []):
                 for record in store.get("records", []):
-                    add_value(record.get("value"))
+                    identity = "_".join(str(part or "") for part in (
+                        database.get("name"),
+                        store.get("name"),
+                        record.get("key"),
+                    ))
+                    normalized_identity = re.sub(
+                        r"([a-z0-9])([A-Z])", r"\1_\2", identity
+                    )
+                    normalized_identity = re.sub(
+                        r"[^a-zA-Z0-9]+", "_", normalized_identity
+                    ).strip("_").lower()
+                    indexed_context = (
+                        "session"
+                        if (
+                            "firebase_local_storage" in normalized_identity
+                            or re.search(r"(?:^|_)(?:auth|authentication)(?:_|$)", normalized_identity)
+                            or _secret_storage_context(identity) is not None
+                        )
+                        else None
+                    )
+                    add_value(record.get("value"), secret_context=indexed_context)
     return fragments
 
 
@@ -464,7 +487,6 @@ def redact_authenticated_text(value: str, state: dict) -> str:
             "",
             cleaned,
         )
-    cleaned = _EMAIL_VALUE_RE.sub("", cleaned)
     cleaned = _TOKEN_VALUE_RE.sub("", cleaned)
     return " ".join(cleaned.split())
 
@@ -537,24 +559,39 @@ def _is_too_large_request(exc: BaseException) -> bool:
     )
 
 
-async def describe_block_page(page: Page) -> Optional[str]:
+async def describe_block_page(
+    page: Page,
+    authenticated_state: dict | None = None,
+) -> Optional[str]:
     """Return a reason if the tab is a captcha/interstitial instead of the app."""
     url = page.url or ""
+    safe_url = (
+        redact_authenticated_text(url, authenticated_state)
+        if authenticated_state is not None
+        else url
+    )
     if _BLOCK_URL_RE.search(url):
-        return f"block URL {url}"
+        return f"block URL {safe_url}"
     try:
         text = await page.inner_text("body", timeout=2000)
     except Exception:
         return None
     if text and _BLOCK_TEXT_RE.search(text):
         snippet = " ".join(text.split())[:120]
-        return f"bot-check copy on {url}: {snippet!r}"
+        if authenticated_state is not None:
+            snippet = redact_authenticated_text(snippet, authenticated_state)
+        return f"bot-check copy on {safe_url}: {snippet!r}"
     return None
 
 
-async def wait_for_app_page(page: Page, *, headless: bool) -> None:
+async def wait_for_app_page(
+    page: Page,
+    *,
+    headless: bool,
+    authenticated_state: dict | None = None,
+) -> None:
     """Fail fast (headless) or wait for the user (headed) when a bot-check is showing."""
-    reason = await describe_block_page(page)
+    reason = await describe_block_page(page, authenticated_state)
     if not reason:
         return
     log(f"  Bot-check / interstitial detected: {reason}", "WARN")
@@ -569,7 +606,7 @@ async def wait_for_app_page(page: Page, *, headless: bool) -> None:
     log(f"  Complete the check in the visible browser. Waiting up to {budget_s}s…", "WARN")
     for _ in range(budget_s // 2):
         await page.wait_for_timeout(2000)
-        reason = await describe_block_page(page)
+        reason = await describe_block_page(page, authenticated_state)
         if not reason:
             log("  Interstitial cleared — continuing", "OK")
             await wait_for_stable_page(page)
@@ -1553,7 +1590,11 @@ async def refine(
             while True:
                 attempt += 1
                 try:
-                    await wait_for_app_page(page, headless=headless)
+                    await wait_for_app_page(
+                        page,
+                        headless=headless,
+                        authenticated_state=storage_state if auth_hook else None,
+                    )
                 except Exception as e:
                     log(f"  Step {fuzzy.step_number} blocked by interstitial: {e}", "ERROR")
                     step = RefinedStep(

@@ -71,7 +71,7 @@ function resolveCli(name) {
 }
 
 function stopChild(child) {
-  if (!child || child.killed || child.exitCode != null) return;
+  if (!child) return;
   const pid = child.pid;
   if (!pid) return;
   if (process.platform === "win32") {
@@ -375,4 +375,5 @@ module.exports = {
   defaultModelForBackend,
   runtimeAuthEnvironment,
   INCOMPLETE_EXIT_CODE,
+  stopChild,
 };
