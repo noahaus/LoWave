@@ -279,7 +279,10 @@ def test_ordinary_email_copy_is_preserved_when_it_is_not_in_auth_state():
     ) == "Invite support@example.com for help"
 
 
-@pytest.mark.parametrize("cookie_name", ["sessionid", "laravel_session"])
+@pytest.mark.parametrize(
+    "cookie_name",
+    ["sessionid", "laravel_session", "_gh_sess", "sb-project-auth-token.0"],
+)
 def test_common_session_cookie_values_are_scrubbed(cookie_name):
     state = {
         "cookies": [{

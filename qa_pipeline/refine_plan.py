@@ -374,8 +374,9 @@ def _secret_storage_context(key: Any, *, cookie: bool = False) -> str | None:
     if normalized in {"session", "auth_session", "user_session"}:
         return "session"
     if cookie and (
-        normalized in {"sessionid", "phpsessid", "jsessionid", "asp_net_sessionid"}
+        normalized in {"sess", "sessionid", "phpsessid", "jsessionid", "asp_net_sessionid"}
         or normalized.endswith("_session")
+        or normalized.endswith("_sess")
     ):
         return "session"
     if re.search(
