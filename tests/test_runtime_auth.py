@@ -293,6 +293,20 @@ def test_common_camel_case_token_and_jwt_keys_are_scrubbed():
     assert redact_authenticated_text("AUTH_TOKEN_123 JWT_VALUE_456", state) == ""
 
 
+def test_short_passcodes_and_session_ids_are_scrubbed_without_scrubbing_user_ids():
+    state = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://app.test",
+            "localStorage": [{
+                "name": "authCache",
+                "value": '{"passcode":1234,"sessionId":"SID5","session":{"id":1}}',
+            }],
+        }],
+    }
+    assert redact_authenticated_text("code 1234 session SID5 Step 1", state) == "code session Step 1"
+
+
 def test_python_bridge_returns_memory_only_state_for_protected_origin(tmp_path, monkeypatch, local_origin):
     secret = "LEAK_SENTINEL_PYTHON_BRIDGE"
     hook = tmp_path / "hook.cjs"
