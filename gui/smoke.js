@@ -37,16 +37,18 @@ const stepsPath =
       generate: stages.includes("generate"),
       runTests: stages.includes("test"),
       onEvent: (evt) => {
-        if (evt.type === "log") console.log(`[log] ${evt.line}`);
+        if (evt.type === "status") console.log(`[status] ${evt.message}`);
         if (evt.type === "stage")
           console.log(`[stage] ${evt.stage}: ${evt.status} ${evt.detail || ""}`);
       },
     });
     console.log("[smoke] OK", result);
+    if (result.logPath) console.log("[smoke] log:", result.logPath);
     process.exit(0);
   } catch (err) {
     console.error("[smoke] FAILED", err.message);
-    if (err.stderr) console.error(String(err.stderr).slice(-2000));
+    if (err.explanation) console.error("[smoke] why:", err.explanation);
+    if (err.logPath) console.error("[smoke] log:", err.logPath);
     process.exit(1);
   }
 })();

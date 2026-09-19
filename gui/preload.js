@@ -10,9 +10,12 @@ contextBridge.exposeInMainWorld("qaPipeline", {
   addProjectSteps: (slug, payload) => ipcRenderer.invoke("projects:addSteps", slug, payload),
   pickSteps: () => ipcRenderer.invoke("pipeline:pickSteps"),
   readSteps: (filePath) => ipcRenderer.invoke("pipeline:readSteps", filePath),
+  specStatus: (opts) => ipcRenderer.invoke("pipeline:specStatus", opts),
   run: (opts) => ipcRenderer.invoke("pipeline:run", opts),
   cancel: () => ipcRenderer.invoke("pipeline:cancel"),
   repoRoot: () => ipcRenderer.invoke("pipeline:repoRoot"),
+  getSettings: () => ipcRenderer.invoke("settings:get"),
+  saveSettings: (patch) => ipcRenderer.invoke("settings:set", patch),
   onEvent: (handler) => {
     const listener = (_event, payload) => handler(payload);
     ipcRenderer.on("pipeline:event", listener);

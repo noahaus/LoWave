@@ -182,8 +182,13 @@ test("generate-only reuses the scoped raw action plan", async (t) => {
 
   assert.equal(result.specPath, scoped.specPath);
   assert.equal(fs.existsSync(result.specPath), true);
+  assert.ok(result.logPath);
+  assert.equal(fs.existsSync(result.logPath), true);
+  assert.match(fs.readFileSync(result.logPath, "utf8"), /\[stdout\]|\[stage\]/);
   assert.match(fs.readFileSync(result.specPath, "utf8"), /Raw checkout plan/);
   assert.doesNotMatch(fs.readFileSync(result.specPath, "utf8"), /Wrong refined plan/);
+  assert.equal(events.some((event) => event.type === "log"), false);
+  assert.ok(events.some((event) => event.type === "status"));
   assert.deepEqual(events.at(-1), { type: "stage", stage: "generate", status: "done", detail: scoped.specPath });
 
   const listed = spawnSync("npx", ["--no-install", "playwright", "test", result.specPath, "--list"], {

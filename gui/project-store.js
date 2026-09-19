@@ -60,6 +60,7 @@ function createProjectStore(repoRoot) {
       name: data.name,
       baseUrl: data.baseUrl,
       username: data.username || "",
+      password: data.password || "",
       createdAt: data.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -102,7 +103,7 @@ function createProjectStore(repoRoot) {
     return project;
   }
 
-  function createProject({ name, baseUrl, username } = {}) {
+  function createProject({ name, baseUrl, username, password } = {}) {
     if (!name || !String(name).trim()) throw new Error("Project name is required");
     if (!baseUrl || !String(baseUrl).trim()) throw new Error("Web app URL is required");
     ensureRoot();
@@ -111,6 +112,7 @@ function createProjectStore(repoRoot) {
       name: String(name).trim(),
       baseUrl: String(baseUrl).trim(),
       username: username ? String(username).trim() : "",
+      password: password != null ? String(password) : "",
       createdAt: new Date().toISOString(),
     });
     return getProject(slug);
@@ -123,6 +125,7 @@ function createProjectStore(repoRoot) {
       name: patch.name != null ? String(patch.name).trim() : current.name,
       baseUrl: patch.baseUrl != null ? String(patch.baseUrl).trim() : current.baseUrl,
       username: patch.username != null ? String(patch.username).trim() : current.username,
+      password: patch.password != null ? String(patch.password) : current.password || "",
       createdAt: current.createdAt,
     });
     return getProject(slug);
@@ -177,6 +180,35 @@ function createProjectStore(repoRoot) {
     return listProjects();
   }
 
+  const settingsFile = path.join(repoRoot, ".qa-pipeline", "gui-settings.json");
+  const defaultSettings = { backend: "ollama", model: "qwen3-coder:30b" };
+
+  function readSettings() {
+    try {
+      if (!fs.existsSync(settingsFile)) return { ...defaultSettings };
+      const data = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+      return {
+        backend: data.backend || defaultSettings.backend,
+        model: data.model != null ? String(data.model) : defaultSettings.model,
+      };
+    } catch {
+      return { ...defaultSettings };
+    }
+  }
+
+  function writeSettings(patch = {}) {
+    const current = readSettings();
+    const next = {
+      backend: patch.backend != null && String(patch.backend).trim()
+        ? String(patch.backend).trim()
+        : current.backend,
+      model: patch.model != null ? String(patch.model).trim() : current.model,
+    };
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    fs.writeFileSync(settingsFile, `${JSON.stringify(next, null, 2)}\n`);
+    return next;
+  }
+
   return {
     projectsDir,
     listProjects,
@@ -186,6 +218,8 @@ function createProjectStore(repoRoot) {
     listSteps,
     addProjectSteps,
     seedDemoIfEmpty,
+    readSettings,
+    writeSettings,
   };
 }
 

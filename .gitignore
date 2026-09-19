@@ -30,6 +30,7 @@ node_modules/
 /refined_action_plan.json
 /.qa-pipeline/
 /tests/generated/
+*.lowave-run.spec.ts
 
 # ── Large media (use Git LFS if you need to track these) ─
 *.mp4
