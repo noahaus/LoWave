@@ -4,6 +4,16 @@ const { spawn } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const {
+  explainFailure,
+  stageStatusMessage,
+  statusFromLogLine,
+} = require("./status-messages");
+const {
+  parseReporterLine,
+  stepFromReporterPayload,
+  wrapSpecInTestSteps,
+} = require("./step-tiles");
 
 const REPO_ROOT = path.resolve(__dirname, "..");
 
@@ -53,10 +63,47 @@ function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName, authHo
   const workflowDir = path.join(REPO_ROOT, ".qa-pipeline", "workflows", digest);
 
   return {
+    workflowDir,
     actionPlan: path.join(workflowDir, "action_plan.json"),
     refinedPlan: path.join(workflowDir, "refined_action_plan.json"),
     specPath: path.join(REPO_ROOT, "tests", "generated", digest, `${stem}.spec.ts`),
   };
+}
+
+function specStatus(opts = {}) {
+  const stepsPath = opts.stepsPath;
+  if (!stepsPath || !fs.existsSync(stepsPath)) {
+    return { specPath: "", exists: false, content: "" };
+  }
+  const resolvedSteps = path.isAbsolute(stepsPath)
+    ? stepsPath
+    : path.resolve(process.cwd(), stepsPath);
+  const specName = opts.specName;
+  const { specPath } = workflowPaths(
+    resolvedSteps,
+    opts.baseUrl || "http://localhost:3000",
+    specName,
+    Object.hasOwn(opts, "specName") && specName !== undefined,
+    opts.authHook || ""
+  );
+  const exists = fs.existsSync(specPath);
+  return {
+    specPath,
+    exists,
+    content: exists ? fs.readFileSync(specPath, "utf8") : "",
+  };
+}
+
+function newRunLogPath(workflowDir) {
+  const logsDir = path.join(workflowDir, "logs");
+  fs.mkdirSync(logsDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return path.join(logsDir, `${stamp}.log`);
+}
+
+function appendRunLog(logPath, line, stream = "stdout") {
+  if (!logPath) return;
+  fs.appendFileSync(logPath, `[${stream}] ${line}\n`);
 }
 
 function resolveCli(name) {
@@ -103,9 +150,22 @@ function cancelledError(stdout = "", stderr = "") {
   return err;
 }
 
+function failureMeta(err) {
+  return {
+    explanation: err?.explanation || "",
+    logPath: err?.logPath || "",
+    stage: err?.stage || "",
+  };
+}
+
 function runEventFromError(err) {
   if (err?.cancelled) {
-    return { type: "run", status: "cancelled", error: err.message };
+    return {
+      type: "run",
+      status: "cancelled",
+      error: err.message,
+      ...failureMeta(err),
+    };
   }
   if (err?.incomplete) {
     return {
@@ -114,6 +174,7 @@ function runEventFromError(err) {
       error: err.message,
       stderr: err.stderr || "",
       result: err.result,
+      ...failureMeta(err),
     };
   }
   return {
@@ -121,7 +182,73 @@ function runEventFromError(err) {
     status: "failed",
     error: err?.message || "Failed",
     stderr: err?.stderr || "",
+    ...failureMeta(err),
   };
+}
+
+function watchJsonl(filePath, onLine) {
+  let position = 0;
+  let pending = "";
+  const consume = () => {
+    let fd;
+    try {
+      fd = fs.openSync(filePath, "r");
+    } catch {
+      return;
+    }
+    try {
+      const size = fs.fstatSync(fd).size;
+      if (size <= position) return;
+      const buf = Buffer.alloc(size - position);
+      fs.readSync(fd, buf, 0, buf.length, position);
+      position = size;
+      pending += buf.toString("utf8");
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() || "";
+      for (const line of lines) {
+        if (line.trim()) onLine(line);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  consume();
+  let watcher;
+  try {
+    watcher = fs.watch(filePath, () => consume());
+  } catch {
+    watcher = null;
+  }
+  const timer = setInterval(consume, 50);
+  return () => {
+    if (watcher) watcher.close();
+    clearInterval(timer);
+    consume();
+    if (pending.trim()) onLine(pending);
+  };
+}
+
+function liveSpecPathFor(specPath) {
+  return specPath.replace(/\.spec\.ts$/, ".lowave-run.spec.ts");
+}
+
+function attachFailure(err, { stage, logPath, incomplete = false } = {}) {
+  let logText = "";
+  try {
+    if (logPath) logText = fs.readFileSync(logPath, "utf8");
+  } catch {
+    logText = "";
+  }
+  err.stage = stage || err.stage || "";
+  err.logPath = logPath || err.logPath || "";
+  err.explanation = explainFailure({
+    stage: err.stage,
+    logText,
+    error: err.message,
+    stderr: err.stderr,
+    incomplete: incomplete || err.incomplete,
+  });
+  return err;
 }
 
 function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {}) {
@@ -141,10 +268,13 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
       detached: process.platform !== "win32",
     });
 
+    const leftovers = { stdout: "", stderr: "" };
     const push = (chunk, stream) => {
-      const text = chunk.toString();
+      const text = leftovers[stream] + chunk.toString();
+      const lines = text.split(/\r?\n/);
+      leftovers[stream] = lines.pop() || "";
       if (onLine) {
-        for (const line of text.split(/\r?\n/)) {
+        for (const line of lines) {
           if (line.length) onLine(line, stream);
         }
       }
@@ -169,6 +299,11 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
     });
     child.on("close", (code) => {
       if (signal) signal.removeEventListener("abort", onAbort);
+      if (onLine) {
+        for (const stream of ["stdout", "stderr"]) {
+          if (leftovers[stream]) onLine(leftovers[stream], stream);
+        }
+      }
       if (signal?.aborted) {
         reject(cancelledError(stdout, stderr));
         return;
@@ -251,7 +386,7 @@ async function runPipeline(opts) {
     throw new Error(`Steps file not found: ${resolvedSteps}`);
   }
 
-  const { actionPlan, refinedPlan, specPath } = workflowPaths(
+  const { workflowDir, actionPlan, refinedPlan, specPath } = workflowPaths(
     resolvedSteps,
     baseUrl,
     specName,
@@ -259,111 +394,222 @@ async function runPipeline(opts) {
     authHook
   );
 
-  if (!parse && refine && !fs.existsSync(actionPlan)) {
-    throw new Error(
-      `Scoped action plan is required when parse is skipped: ${actionPlan}. Run parse for this workflow first.`
-    );
-  }
-  if (!parse && !refine && generate && !fs.existsSync(actionPlan)) {
-    throw new Error(
-      `Scoped action plan is required when parse and refine are skipped: ${actionPlan}. Run parse for this workflow first.`
-    );
-  }
-  if (!generate && runTests && !fs.existsSync(specPath)) {
-    throw new Error(
-      `Scoped generated spec is required when generate is skipped: ${specPath}. Run generate for this workflow first.`
-    );
-  }
-
   const llmArgs = [];
   if (backend) llmArgs.push("--backend", backend);
   if (model) llmArgs.push("--model", model);
 
-  const emit = (stage, status, detail) =>
-    onEvent({ type: "stage", stage, status, detail });
+  const runningAny = parse || refine || generate || runTests;
+  let logPath = "";
+  let currentStage = "";
+  let testSpecText = "";
 
-  const log = (line, stream = "stdout") =>
-    onEvent({ type: "log", stream, line });
-
-  const throwIfCancelled = () => {
-    if (signal?.aborted) throw cancelledError();
-  };
-  const authEnv = runtimeAuthEnvironment(authHook);
-
-  throwIfCancelled();
-  if (parse) {
-    fs.mkdirSync(path.dirname(actionPlan), { recursive: true });
-    emit("parse", "running", "steps → action_plan.json");
-    const args = [
-      resolvedSteps,
-      actionPlan,
-      "--base-url",
-      baseUrl,
-      ...llmArgs,
-      ...(authHook ? ["--runtime-auth"] : []),
-    ];
-    if (username) args.push("--username", username);
-    if (password) args.push("--password", password);
-    await runCommand(resolveCli("qa-parse"), args, { onLine: log, signal, env: authEnv });
-    emit("parse", "done", actionPlan);
-  }
-
-  throwIfCancelled();
-  if (refine) {
-    emit("refine", "running", "grounding against live DOM");
-    const args = [
-      "--plan",
-      actionPlan,
-      "--out",
-      refinedPlan,
-      "--url",
-      baseUrl,
-      ...(headed ? ["--headed"] : []),
-      ...llmArgs,
-      ...(authHook ? ["--auth-hook", authHook] : []),
-    ];
-    await runCommand(resolveCli("qa-refine"), args, { onLine: log, signal, env: authEnv });
-    emit("refine", "done", refinedPlan);
-  }
-
-  throwIfCancelled();
-  if (generate) {
-    fs.mkdirSync(path.dirname(specPath), { recursive: true });
-    emit("generate", "running", "plan → Playwright spec");
-    const planIn = refine && fs.existsSync(refinedPlan) ? refinedPlan : actionPlan;
-    try {
-      await runCommand(
-        resolveCli("qa-generate"),
-        [planIn, specPath, "--base-url", baseUrl, ...(authHook ? ["--runtime-auth"] : [])],
-        { onLine: log, signal, env: authEnv }
+  try {
+    if (!parse && refine && !fs.existsSync(actionPlan)) {
+      throw new Error(
+        `Scoped action plan is required when parse is skipped: ${actionPlan}. Run parse for this workflow first.`
       );
-      emit("generate", "done", specPath);
-    } catch (err) {
-      if ((err.exitCode ?? err.code) === INCOMPLETE_EXIT_CODE) {
-        err.incomplete = true;
-        err.result = { specPath, incomplete: true };
-        emit("generate", "incomplete", specPath);
+    }
+    if (!parse && !refine && generate && !fs.existsSync(actionPlan)) {
+      throw new Error(
+        `Scoped action plan is required when parse and refine are skipped: ${actionPlan}. Run parse for this workflow first.`
+      );
+    }
+    if (!generate && runTests && !fs.existsSync(specPath)) {
+      throw new Error(
+        `Scoped generated spec is required when generate is skipped: ${specPath}. Run generate for this workflow first.`
+      );
+    }
+
+    if (!runningAny) {
+      return { actionPlan, refinedPlan, specPath };
+    }
+
+    fs.mkdirSync(workflowDir, { recursive: true });
+    logPath = newRunLogPath(workflowDir);
+    fs.writeFileSync(logPath, `# QA pipeline run ${new Date().toISOString()}\n`);
+
+    const emit = (stage, status, detail) => {
+      currentStage = stage;
+      const message = stageStatusMessage(stage, status);
+      if (message) onEvent({ type: "status", stage, message });
+      onEvent({ type: "stage", stage, status, detail });
+    };
+
+    const onLine = (line, stream = "stdout") => {
+      appendRunLog(logPath, line, stream);
+      const message = statusFromLogLine(line, currentStage);
+      if (message) onEvent({ type: "status", stage: currentStage, stream, message });
+    };
+
+    const throwIfCancelled = () => {
+      if (signal?.aborted) throw cancelledError();
+    };
+    const authEnv = runtimeAuthEnvironment(authHook);
+
+    throwIfCancelled();
+    if (parse) {
+      fs.mkdirSync(path.dirname(actionPlan), { recursive: true });
+      appendRunLog(logPath, "==== parse ====", "stage");
+      emit("parse", "running", "steps → action_plan.json");
+      const args = [
+        resolvedSteps,
+        actionPlan,
+        "--base-url",
+        baseUrl,
+        ...llmArgs,
+        ...(authHook ? ["--runtime-auth"] : []),
+      ];
+      if (username) args.push("--username", username);
+      if (password) args.push("--password", password);
+      await runCommand(resolveCli("qa-parse"), args, { onLine, signal, env: authEnv });
+      emit("parse", "done", actionPlan);
+    }
+
+    throwIfCancelled();
+    if (refine) {
+      appendRunLog(logPath, "==== refine ====", "stage");
+      emit("refine", "running", "grounding against live DOM");
+      const args = [
+        "--plan",
+        actionPlan,
+        "--out",
+        refinedPlan,
+        "--url",
+        baseUrl,
+        ...(headed ? ["--headed"] : []),
+        ...llmArgs,
+        ...(authHook ? ["--auth-hook", authHook] : []),
+      ];
+      await runCommand(resolveCli("qa-refine"), args, { onLine, signal, env: authEnv });
+      emit("refine", "done", refinedPlan);
+    }
+
+    throwIfCancelled();
+    if (generate) {
+      fs.mkdirSync(path.dirname(specPath), { recursive: true });
+      appendRunLog(logPath, "==== generate ====", "stage");
+      emit("generate", "running", "plan → Playwright spec");
+      const planIn = refine && fs.existsSync(refinedPlan) ? refinedPlan : actionPlan;
+      try {
+        await runCommand(
+          resolveCli("qa-generate"),
+          [planIn, specPath, "--base-url", baseUrl, ...(authHook ? ["--runtime-auth"] : [])],
+          { onLine, signal, env: authEnv }
+        );
+        emit("generate", "done", specPath);
+      } catch (err) {
+        if ((err.exitCode ?? err.code) === INCOMPLETE_EXIT_CODE) {
+          err.incomplete = true;
+          err.result = { specPath, incomplete: true, logPath };
+          emit("generate", "incomplete", specPath);
+        }
+        throw err;
       }
+    }
+
+    throwIfCancelled();
+    if (runTests) {
+      appendRunLog(logPath, "==== test ====", "stage");
+      emit("test", "running", specPath);
+      const originalSpec = fs.existsSync(specPath) ? fs.readFileSync(specPath, "utf8") : "";
+      const wrappedSpec = wrapSpecInTestSteps(originalSpec);
+      const livePath = wrappedSpec !== originalSpec ? liveSpecPathFor(specPath) : specPath;
+      if (livePath !== specPath) fs.writeFileSync(livePath, wrappedSpec);
+      const specText = wrappedSpec || originalSpec;
+      testSpecText = specText;
+      const progressPath = path.join(workflowDir, "step-progress.jsonl");
+      fs.writeFileSync(progressPath, "");
+      const reporterPath = path.join(__dirname, "playwright-step-reporter.js");
+      const emitProgress = (payload) => {
+        if (!payload) return;
+        if (payload.status === "test-end") {
+          onEvent({
+            type: "test-step",
+            status: "test-end",
+            passed: Boolean(payload.passed),
+            specPath,
+            specText,
+          });
+          return;
+        }
+        const step = stepFromReporterPayload(payload, specText);
+        if (!step) return;
+        onEvent({
+          type: "test-step",
+          step,
+          status: payload.status,
+          specPath,
+          specText,
+        });
+      };
+      const stopWatch = watchJsonl(progressPath, (line) => {
+        emitProgress(parseReporterLine(line) || (() => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })());
+      });
+      try {
+        await runCommand(
+          "npx",
+          ["playwright", "test", livePath, "--reporter", "list", "--reporter", reporterPath],
+          {
+            onLine: (line, stream) => {
+              const payload = parseReporterLine(line);
+              if (payload) {
+                emitProgress(payload);
+                return;
+              }
+              onLine(line, stream);
+            },
+            env: {
+              QA_SLOWMO: "0",
+              QA_BASE_URL: baseUrl,
+              LOWAVE_STEP_EVENTS: progressPath,
+              ...authEnv,
+            },
+            signal,
+          }
+        );
+        emit("test", "done", specPath);
+        onEvent({ type: "test-steps", passed: true, specPath, specText });
+      } finally {
+        stopWatch();
+        if (livePath !== specPath) {
+          try {
+            fs.unlinkSync(livePath);
+          } catch {
+            // Best-effort cleanup of the wrapped spec used for live step reporting.
+          }
+        }
+      }
+    }
+
+    return { actionPlan, refinedPlan, specPath, logPath };
+  } catch (err) {
+    if (currentStage === "test" && !err?.cancelled) {
+      onEvent({
+        type: "test-steps",
+        passed: false,
+        specPath,
+        specText: testSpecText,
+        output: `${err.stdout || ""}\n${err.stderr || ""}\n${err.message || ""}`,
+      });
+    }
+    if (err?.cancelled) {
+      err.stage = currentStage;
+      err.logPath = logPath;
+      err.explanation = "The run was cancelled before it finished.";
       throw err;
     }
+    throw attachFailure(err, {
+      stage: currentStage,
+      logPath,
+      incomplete: err.incomplete,
+    });
   }
-
-  throwIfCancelled();
-  if (runTests) {
-    emit("test", "running", specPath);
-    await runCommand(
-      "npx",
-      ["playwright", "test", specPath],
-      {
-        onLine: log,
-        env: { QA_SLOWMO: "0", QA_BASE_URL: baseUrl, ...authEnv },
-        signal,
-      }
-    );
-    emit("test", "done", specPath);
-  }
-
-  return { actionPlan, refinedPlan, specPath };
 }
 
 module.exports = {
@@ -376,4 +622,5 @@ module.exports = {
   runtimeAuthEnvironment,
   INCOMPLETE_EXIT_CODE,
   stopChild,
+  specStatus,
 };

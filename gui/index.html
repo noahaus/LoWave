@@ -7,26 +7,37 @@
     content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
   />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>QA Pipeline</title>
+  <title>LoWave</title>
   <link rel="icon" href="icon.png" type="image/png" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="app">
     <header class="hero">
-      <img class="app-icon" src="icon.png" width="56" height="56" alt="QA Pipeline" />
-      <div class="hero-copy">
-        <p class="brand">Kestrel QA Pipeline</p>
-        <h1>Projects to Playwright</h1>
-        <p class="lede">Create a project for the web app under test, add numbered steps files, then run parse → refine → generate.</p>
-      </div>
+      <img class="app-icon" src="icon.png" width="56" height="56" alt="LoWave" />
+      <h1>LOWAVE</h1>
+      <nav class="header-nav" aria-label="App">
+        <button type="button" id="homeBtn" class="btn ghost">Home</button>
+        <button type="button" id="aboutBtn" class="btn ghost">About</button>
+        <button type="button" id="settingsBtn" class="btn ghost">Settings</button>
+      </nav>
     </header>
 
     <section id="view-home">
-      <div class="layout home-layout">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Projects</h2>
+        </div>
+        <div id="projectCards" class="card-grid"></div>
+        <p id="homeStatus" class="status" aria-live="polite"></p>
+      </section>
+    </section>
+
+    <section id="view-new" hidden>
+      <div class="new-project-page">
         <section class="panel">
           <h2>New project</h2>
-          <p class="hint">A project is a container for one web app. Add as many steps files as you need after you create it.</p>
+          <p class="hint">Enter the website this project will write tests for. You can add steps files after the project is created.</p>
           <label class="field">
             <span>Project name</span>
             <input id="newName" type="text" placeholder="Expense app" />
@@ -42,21 +53,13 @@
           <div class="actions">
             <button type="button" id="createBtn" class="btn primary">Create project</button>
           </div>
-          <p id="homeStatus" class="status" aria-live="polite"></p>
-        </section>
-
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Projects</h2>
-          </div>
-          <div id="projectCards" class="card-grid"></div>
+          <p id="newStatus" class="status" aria-live="polite"></p>
         </section>
       </div>
     </section>
 
     <section id="view-project" hidden>
       <div class="project-banner">
-        <button type="button" id="backBtn" class="btn ghost">Back to projects</button>
         <div class="project-banner-fields">
           <label class="field">
             <span>Project</span>
@@ -70,83 +73,134 @@
             <span>Username</span>
             <input id="projUsername" type="text" />
           </label>
-          <button type="button" id="saveProjBtn" class="btn ghost">Save</button>
+          <label class="field">
+            <span>Password</span>
+            <input id="projPassword" type="password" placeholder="optional" />
+          </label>
+          <div class="project-banner-save">
+            <button type="button" id="saveProjBtn" class="btn ghost">Save</button>
+            <p id="saveProjStatus" class="status" aria-live="polite"></p>
+          </div>
         </div>
       </div>
 
-      <div class="layout">
-        <section class="panel controls">
-          <h2>Steps files</h2>
-          <div id="stepsList" class="steps-list"></div>
-
-          <label class="field">
-            <span>New steps file name</span>
-            <div class="row">
-              <input id="newStepsName" type="text" placeholder="login_flow" />
-              <button type="button" id="createStepsBtn" class="btn ghost">Create</button>
+      <div class="project-body">
+        <div class="project-col">
+          <section class="panel steps-sidebar">
+            <h2>Steps files</h2>
+            <div id="stepsList" class="steps-list"></div>
+            <button type="button" id="addStepsBtn" class="btn ghost add-steps-btn">+ Add steps file</button>
+            <div id="addStepsForm" class="add-steps-form" hidden>
+              <label class="field">
+                <span>New steps file name</span>
+                <div class="row">
+                  <input id="newStepsName" type="text" placeholder="login_flow" />
+                  <button type="button" id="createStepsBtn" class="btn ghost">Create</button>
+                </div>
+              </label>
+              <button type="button" id="importBtn" class="btn ghost">Import .txt</button>
+              <p id="addStepsStatus" class="status" aria-live="polite"></p>
             </div>
-          </label>
-          <div class="actions wrap">
-            <button type="button" id="importBtn" class="btn ghost">Import .txt</button>
-          </div>
+          </section>
 
-          <div class="grid2">
-            <label class="field">
-              <span>Backend</span>
-              <select id="backend">
-                <option value="ollama" selected>ollama</option>
-                <option value="anthropic">anthropic</option>
-                <option value="openai">openai</option>
-                <option value="google">google</option>
-                <option value="claude-cli">Claude Code subscription</option>
-                <option value="codex-cli">Codex subscription</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>Model</span>
-              <input id="model" type="text" value="qwen3-coder:30b" />
-            </label>
-          </div>
+          <section class="panel file-contents">
+            <div id="stepsEmptyState">
+              <p class="hint">Click a steps file to see its contents.</p>
+            </div>
+            <div id="stepsDetail" hidden>
+              <div class="panel-head">
+                <h2 id="stepsFileTitle" class="steps-file-title">Steps file</h2>
+                <span id="stagePills" class="pills"></span>
+              </div>
+              <div class="pane-toggle-group" role="tablist" aria-label="File contents">
+                <button type="button" id="paneStepsBtn" class="pane-toggle active" role="tab" aria-selected="true">Steps</button>
+                <button type="button" id="paneLogsBtn" class="pane-toggle" role="tab" aria-selected="false">Logs</button>
+              </div>
+              <div class="console-pane">
+                <pre id="stepsPreview" class="preview-box" role="tabpanel">Select a steps file to preview.</pre>
+                <pre id="log" class="log" hidden role="tabpanel" aria-live="polite">Status updates will appear here when you run Parse or Test.</pre>
+              </div>
 
-          <div class="grid2">
-            <label class="field">
-              <span>Password</span>
-              <input id="password" type="password" placeholder="optional" />
-            </label>
-            <label class="field">
-              <span>Spec name (optional)</span>
-              <input id="specName" type="text" placeholder="from steps filename" />
-            </label>
-          </div>
+              <div class="actions">
+                <button type="button" id="parseBtn" class="btn primary">Parse</button>
+                <button type="button" id="testBtn" class="btn ghost">Test</button>
+                <button type="button" id="cancelBtn" class="btn danger" disabled>Cancel</button>
+                <p id="status" class="status" aria-live="polite">Idle</p>
+              </div>
+            </div>
+          </section>
+        </div>
 
-          <fieldset class="stages">
-            <legend>Stages</legend>
-            <label><input type="checkbox" id="doParse" checked /> Parse</label>
-            <label><input type="checkbox" id="doRefine" checked /> Refine</label>
-            <label><input type="checkbox" id="doGenerate" checked /> Generate</label>
-            <label><input type="checkbox" id="doTest" /> Run Playwright</label>
-            <label><input type="checkbox" id="headed" checked /> Show browser</label>
-          </fieldset>
+        <div class="project-col">
+          <section class="panel generated-tests">
+            <div id="testsEmptyState">
+              <h2>Generated tests</h2>
+              <p class="hint">Click a steps file to see the Playwright tests generated for it.</p>
+            </div>
+            <div id="testsDetail" hidden>
+              <div class="panel-head">
+                <h2 id="testsFileTitle" class="steps-file-title">Generated tests</h2>
+              </div>
+              <p id="noTestsHint" class="hint no-tests-hint" hidden>
+                No tests have been generated for this steps file yet. Click Parse first.
+              </p>
+              <div id="stepTiles" class="step-tiles" hidden></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
 
-          <div class="actions">
-            <button type="button" id="runBtn" class="btn primary">Run pipeline</button>
-            <button type="button" id="cancelBtn" class="btn danger" disabled>Cancel</button>
-            <p id="status" class="status" aria-live="polite">Idle</p>
-          </div>
+    <section id="view-about" hidden>
+      <div class="about-page">
+        <button type="button" id="aboutBackBtn" class="btn ghost">Back</button>
+        <section class="panel">
+          <h2>About LoWave</h2>
+          <p class="hint">
+            LoWave turns ordinary test instructions into automated browser tests.
+            Describe what a person would do in the web app, in numbered English steps.
+            LoWave reads those steps, looks at the live site, and builds a test you can run again.
+          </p>
+          <p class="hint">
+            A project holds one website and the step files that belong to it.
+            Open a project, choose a steps file, then use Parse to generate the test
+            and Test to run it. Each generated step shows whether it passed or failed.
+          </p>
+          <p class="hint">
+            Settings choose how LoWave talks to the model that interprets your steps.
+            Those choices apply to every project.
+          </p>
         </section>
+      </div>
+    </section>
 
-        <section class="panel preview">
-          <div class="panel-head">
-            <h2>Steps preview</h2>
-            <span id="stagePills" class="pills"></span>
-          </div>
-          <pre id="stepsPreview" class="preview-box">Select a steps file to preview.</pre>
-          <h2>Log</h2>
-          <pre id="log" class="log"></pre>
+    <section id="view-settings" hidden>
+      <div class="settings-page">
+        <button type="button" id="settingsBackBtn" class="btn ghost">Back</button>
+        <section class="panel">
+          <h2>Settings</h2>
+          <p class="hint">Backend and model apply to every project and are saved between sessions.</p>
+          <label class="field">
+            <span>Backend</span>
+            <select id="backend">
+              <option value="ollama" selected>ollama</option>
+              <option value="anthropic">anthropic</option>
+              <option value="openai">openai</option>
+              <option value="google">google</option>
+              <option value="claude-cli">Claude Code subscription</option>
+              <option value="codex-cli">Codex subscription</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <input id="model" type="text" value="qwen3-coder:30b" />
+          </label>
+          <p id="settingsStatus" class="status" aria-live="polite"></p>
         </section>
       </div>
     </section>
   </div>
+  <script src="step-tiles.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

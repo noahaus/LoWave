@@ -87,13 +87,20 @@ test("incomplete generate is a distinct run result and never starts Playwright",
   assert.equal(err.incomplete, true);
   assert.equal(err.cancelled, undefined);
   assert.equal(err.exitCode ?? err.code, 3);
+  assert.ok(err.logPath);
+  assert.equal(fs.existsSync(err.logPath), true);
+  assert.match(err.explanation, /generate|playwright action|todo/i);
   assert.equal(fs.existsSync(scoped.specPath), true);
   assert.match(fs.readFileSync(scoped.specPath, "utf8"), /throw new Error/);
+  assert.equal(events.some((event) => event.type === "log"), false);
+  assert.ok(events.some((event) => event.type === "status"));
   assert.equal(events.some((event) => event.stage === "test"), false);
   assert.ok(events.some((event) => event.stage === "generate" && event.status === "incomplete"));
   const mapped = runEventFromError(err);
   assert.equal(mapped.type, "run");
   assert.equal(mapped.status, "incomplete");
+  assert.equal(mapped.explanation, err.explanation);
+  assert.equal(mapped.logPath, err.logPath);
 });
 
 test("complete generate still starts the test stage when requested", async (t) => {
@@ -145,6 +152,9 @@ test("cancelled and provider failures stay distinct from incomplete", () => {
     status: "failed",
     error: failed.message,
     stderr: "provider down",
+    explanation: "",
+    logPath: "",
+    stage: "",
   });
 });
 
@@ -184,6 +194,8 @@ test("renderer incomplete event unlocks controls and asks for review", () => {
     type: "run",
     status: "incomplete",
     error: "qa-generate exited with code 3",
+    explanation: "Generate could not turn every step into a Playwright action.",
+    logPath: "/tmp/run.log",
     result: { specPath: "/tmp/draft.spec.ts", incomplete: true },
   }, ui);
 
@@ -192,4 +204,57 @@ test("renderer incomplete event unlocks controls and asks for review", () => {
   assert.equal(ui.statusClass, "warn");
   assert.equal(ui.stageState.generate, "incomplete");
   assert.equal(ui.stageState.test, "idle");
+  assert.match(ui.log, /what went wrong/i);
+  assert.match(ui.log, /playwright action/i);
+  assert.doesNotMatch(ui.log, /exited with code 3/);
+});
+
+test("renderer shows parsed English on failure and ignores raw log lines", () => {
+  const ui = {
+    stageState: { parse: "idle", refine: "running", generate: "idle", test: "idle" },
+    log: "",
+    status: "",
+    statusClass: "",
+    running: true,
+    renderPills() {},
+    setStatus(text, cls = "") {
+      this.status = text;
+      this.statusClass = cls;
+    },
+    setRunUi(isRunning) {
+      this.running = isRunning;
+    },
+    markRunningStages(status) {
+      for (const name of Object.keys(this.stageState)) {
+        if (this.stageState[name] === "running") this.stageState[name] = status;
+      }
+    },
+    appendLog(line) {
+      this.log += (this.log ? "\n" : "") + line;
+    },
+    resetStages() {
+      for (const name of Object.keys(this.stageState)) this.stageState[name] = "idle";
+    },
+    clearLog() {
+      this.log = "";
+    },
+  };
+
+  applyPipelineEvent({ type: "log", line: "locator.click: Timeout 30000ms exceeded" }, ui);
+  applyPipelineEvent({ type: "status", message: "Working on step 2 of 8." }, ui);
+  applyPipelineEvent({
+    type: "run",
+    status: "failed",
+    error: "qa-refine exited with code 1",
+    stderr: "locator.click: Timeout 30000ms exceeded\n    at execute_step",
+    explanation: "Step 2 could not be completed. The page waited too long for the next element to appear.",
+    logPath: "/tmp/refine.log",
+  }, ui);
+
+  assert.equal(ui.running, false);
+  assert.equal(ui.statusClass, "err");
+  assert.match(ui.log, /working on step 2 of 8/i);
+  assert.match(ui.log, /waited too long/i);
+  assert.doesNotMatch(ui.log, /locator\.click/);
+  assert.doesNotMatch(ui.log, /execute_step/);
 });
