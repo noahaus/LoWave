@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { defaultModelForBackend, runCommand, stopChild, specStatus } = require("./pipeline-runner");
+const { defaultModelForBackend, runCommand, stopChild, specStatus, createResultsStore } = require("./pipeline-runner");
 const { projectHost } = require("./renderer");
 
 
@@ -27,9 +27,49 @@ test("specStatus reports a missing Playwright file until one exists", () => {
     assert.equal(present.exists, true);
     assert.equal(present.specPath, missing.specPath);
     assert.match(present.content, /test\('ok'/);
+    assert.equal(typeof present.workflowHash, "string");
+    assert.ok(present.workflowHash.length > 0);
+    assert.deepEqual(present.stepStatuses, {});
+    assert.equal(present.lastRun, null);
   } finally {
     if (specPath) fs.rmSync(path.dirname(specPath), { recursive: true, force: true });
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("specStatus returns the latest SQLite step history for a workflow", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lowave-spec-history-"));
+  const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "lowave-results-"));
+  const store = createResultsStore(path.join(dbDir, "qa-results.sqlite"));
+  try {
+    const stepsPath = path.join(dir, "flow.txt");
+    fs.writeFileSync(stepsPath, "1. Open login\n2. Click Sign in\n");
+    const initial = specStatus({ stepsPath, baseUrl: "http://localhost:3000", resultsStore: store });
+    assert.deepEqual(initial.stepStatuses, {});
+    const run = store.startRun({
+      workflowHash: initial.workflowHash,
+      stepsPath,
+      specPath: initial.specPath,
+      steps: [
+        { number: 1, text: "Open login" },
+        { number: 2, text: "Click Sign in" },
+      ],
+    });
+    store.setStepStatus(run.id, 1, "pass");
+    store.setStepStatus(run.id, 2, "fail");
+    store.finishRun(run.id, { passed: false });
+    const loaded = specStatus({ stepsPath, baseUrl: "http://localhost:3000", resultsStore: store });
+    assert.deepEqual(loaded.stepStatuses, { 1: "pass", 2: "fail" });
+    assert.equal(loaded.lastRun.passed, false);
+    assert.equal(loaded.lastRun.runId, run.id);
+  } finally {
+    try {
+      store.close();
+    } catch {
+      // already closed
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dbDir, { recursive: true, force: true });
   }
 });
 
@@ -67,6 +107,9 @@ test("backend and model live on the settings page, not the project form", () => 
   assert.match(project, /id="stepTiles"/);
   assert.match(project, /id="paneStepsBtn"/);
   assert.match(project, /id="paneLogsBtn"/);
+  assert.match(project, /id="browserHeaded"/);
+  assert.match(project, /id="browserHeadless"/);
+  assert.match(project, /name="browserMode"/);
   assert.match(project, /class="project-col"/);
   assert.match(project, /id="projPassword"/);
   assert.match(project, /id="saveProjStatus"/);
@@ -89,6 +132,7 @@ test("header navigation includes Home, About, and Settings", () => {
   assert.match(html, /id="view-about"/);
   assert.match(html, /About LoWave/);
   assert.doesNotMatch(html, /id="newBackBtn"/);
+  assert.doesNotMatch(html, /class="app-icon"/);
 });
 
 test("project tiles use the hover card and show the URL host", () => {
@@ -96,6 +140,10 @@ test("project tiles use the hover card and show the URL host", () => {
   assert.match(css, /\.project-card \.background/);
   assert.match(css, /\.project-card \.box1/);
   assert.match(css, /\.project-card:hover/);
+  assert.match(css, /\.step-tile-script/);
+  assert.match(css, /\.step-tile\.expanded/);
+  assert.match(css, /\.step-tile-script-wrap/);
+  assert.match(css, /\.status-file-link/);
   assert.equal(projectHost("http://localhost:3000/reports"), "localhost:3000");
   assert.equal(projectHost("not a url"), "not a url");
 });

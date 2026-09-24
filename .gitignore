@@ -26,6 +26,9 @@ node_modules/
 
 # ── Pipeline outputs (generated at run time) ────────────
 # Committed reference copies live in examples/ instead.
+/outputs/*
+!/outputs/.gitkeep
+# Legacy locations (pre-outputs/ layout); keep ignored if leftover files exist.
 /action_plan.json
 /refined_action_plan.json
 /.qa-pipeline/

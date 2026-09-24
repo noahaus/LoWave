@@ -11,7 +11,7 @@ Ungrounded or unrefined steps fall back to the original heuristic locator logic.
 Unresolved required steps stay in the spec as TODO/REVIEW comments so a draft
 remains inspectable, but the generated test fails before page actions.
 
-    python -m qa_pipeline.generate refined_action_plan.json tests/generated.spec.ts
+    python -m qa_pipeline.generate outputs/plans/refined_action_plan.json outputs/tests/generated.spec.ts
 """
 import re
 import ast
@@ -695,9 +695,9 @@ def generate(plan_path: Path, output_path: Path, base_url_override: str | None =
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Compile a (refined) action plan into a Playwright spec.")
-    ap.add_argument("plan", nargs="?", default="refined_action_plan.json",
+    ap.add_argument("plan", nargs="?", default=str(config.DEFAULT_REFINED_PLAN),
                     help="Path to the (refined) action plan JSON")
-    ap.add_argument("output", nargs="?", default="tests/generated.spec.ts",
+    ap.add_argument("output", nargs="?", default=str(config.DEFAULT_SPEC),
                     help="Where to write the generated .spec.ts")
     ap.add_argument("--base-url", default=None,
                     help="Override the plan's base_url (default: plan value, then $QA_BASE_URL)")

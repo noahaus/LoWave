@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const { runPipeline, runEventFromError, specStatus, REPO_ROOT } = require("./pipeline-runner");
@@ -27,7 +27,7 @@ function createWindow() {
     minWidth: 860,
     minHeight: 620,
     title: "LoWave",
-    backgroundColor: "#f0ead6",
+    backgroundColor: "#ffffff",
     icon: ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -81,14 +81,19 @@ function cancelPipeline() {
   return { cancelled: true };
 }
 
-function registerIpc() {
-  ipcMain.handle("projects:list", () => store.seedDemoIfEmpty());
-  ipcMain.handle("projects:get", (_e, slug) => store.getProject(slug));
-  ipcMain.handle("projects:create", (_e, payload) => store.createProject(payload));
-  ipcMain.handle("projects:update", (_e, slug, patch) => store.updateProject(slug, patch));
-  ipcMain.handle("projects:addSteps", (_e, slug, payload) => store.addProjectSteps(slug, payload));
+function handleIpc(channel, listener) {
+  ipcMain.removeHandler(channel);
+  ipcMain.handle(channel, listener);
+}
 
-  ipcMain.handle("pipeline:pickSteps", async () => {
+function registerIpc() {
+  handleIpc("projects:list", () => store.seedDemoIfEmpty());
+  handleIpc("projects:get", (_e, slug) => store.getProject(slug));
+  handleIpc("projects:create", (_e, payload) => store.createProject(payload));
+  handleIpc("projects:update", (_e, slug, patch) => store.updateProject(slug, patch));
+  handleIpc("projects:addSteps", (_e, slug, payload) => store.addProjectSteps(slug, payload));
+
+  handleIpc("pipeline:pickSteps", async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
       title: "Import a steps file",
       defaultPath: path.join(REPO_ROOT, "examples", "workflows"),
@@ -98,23 +103,33 @@ function registerIpc() {
     if (canceled || !filePaths.length) return null;
     return filePaths[0];
   });
-  ipcMain.handle("pipeline:readSteps", (_e, filePath) => {
+  handleIpc("pipeline:readSteps", (_e, filePath) => {
     return fs.readFileSync(filePath, "utf8");
   });
-  ipcMain.handle("pipeline:specStatus", (_e, opts) => specStatus(opts));
-  ipcMain.handle("pipeline:run", async (_e, opts) => executePipeline(opts));
-  ipcMain.handle("pipeline:cancel", () => cancelPipeline());
-  ipcMain.handle("pipeline:repoRoot", () => REPO_ROOT);
+  handleIpc("pipeline:specStatus", (_e, opts) => specStatus(opts));
+  handleIpc("pipeline:run", async (_e, opts) => executePipeline(opts));
+  handleIpc("pipeline:cancel", () => cancelPipeline());
+  handleIpc("pipeline:repoRoot", () => REPO_ROOT);
+  handleIpc("pipeline:openPath", async (_e, filePath) => {
+    if (typeof filePath !== "string" || !filePath.trim()) return { ok: false };
+    const resolved = path.resolve(filePath);
+    const rel = path.relative(REPO_ROOT, resolved);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return { ok: false };
+    if (!fs.existsSync(resolved)) return { ok: false };
+    const error = await shell.openPath(resolved);
+    return { ok: !error, error: error || undefined };
+  });
 
-  ipcMain.handle("settings:get", () => store.readSettings());
-  ipcMain.handle("settings:set", (_e, patch) => store.writeSettings(patch));
+  handleIpc("settings:get", () => store.readSettings());
+  handleIpc("settings:set", (_e, patch) => store.writeSettings(patch));
 }
+
+registerIpc();
 
 app.whenReady().then(() => {
   if (process.platform === "darwin" && app.dock) {
     app.dock.setIcon(ICON_PATH);
   }
-  registerIpc();
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

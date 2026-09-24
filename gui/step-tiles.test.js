@@ -12,6 +12,7 @@ const {
   parseReporterLine,
   stepFromReporterPayload,
   statusesAfterProgress,
+  specSnippetForStep,
 } = require("./step-tiles");
 
 test("parseNumberedSteps reads 1. lines from a steps file", () => {
@@ -46,8 +47,8 @@ test("resultsForTestRun marks the failing spec step red and earlier ones green",
   const steps = parseNumberedSteps("1. Open login\n2. Click Sign in\n3. Assert dashboard");
   const results = resultsForTestRun({
     passed: false,
-    output: "Error: Timeout\n    at tests/generated/abc/flow.spec.ts:5:3",
-    specPath: "tests/generated/abc/flow.spec.ts",
+    output: "Error: Timeout\n    at outputs/tests/abc/flow.spec.ts:5:3",
+    specPath: "outputs/tests/abc/flow.spec.ts",
     specText: spec,
     steps,
   });
@@ -59,6 +60,30 @@ test("resultsForTestRun turns every tile green when the spec passes", () => {
   const steps = parseNumberedSteps("1. Open login\n2. Click Sign in");
   const results = resultsForTestRun({ passed: true, steps });
   assert.deepEqual(results.map((r) => r.status), ["pass", "pass"]);
+});
+
+test("specSnippetForStep returns the Playwright block for one numbered step", () => {
+  const spec = [
+    "test('flow', async ({ page }) => {",
+    "  // Step 1: Open login",
+    "  await page.goto('/');",
+    "  // Step 2: Click Sign in",
+    "  await page.getByRole('button').click();",
+    "  await expect(page).toHaveURL('/app');",
+    "  // Step 3: Assert dashboard",
+    "  await expect(page.getByText('Dashboard')).toBeVisible();",
+    "});",
+  ].join("\n");
+  assert.match(specSnippetForStep(spec, 1), /await page\.goto\('\/'\);/);
+  assert.doesNotMatch(specSnippetForStep(spec, 1), /Click Sign in/);
+  const two = specSnippetForStep(spec, 2);
+  assert.match(two, /getByRole\('button'\)/);
+  assert.match(two, /toHaveURL/);
+  assert.doesNotMatch(two, /Assert dashboard/);
+  const last = specSnippetForStep(spec, 3);
+  assert.match(last, /Dashboard/);
+  assert.doesNotMatch(last, /^\s*\}\);\s*$/m);
+  assert.equal(specSnippetForStep(spec, 9), "");
 });
 
 test("parseSpecSteps reads generated Step comments", () => {
@@ -106,4 +131,10 @@ test("statusesAfterProgress turns earlier tiles green as the next step starts", 
   assert.equal(statuses[1], "pass");
   assert.equal(statuses[2], "fail");
   assert.equal(statuses[3], undefined);
+
+  const frozen = statusesAfterProgress(
+    { 1: "pass", 2: "running", 3: "idle" },
+    { status: "test-end", passed: false, steps }
+  );
+  assert.deepEqual(frozen, { 1: "pass", 2: "running", 3: "idle" });
 });

@@ -291,7 +291,8 @@ function explainFailure({ stage, logText = "", error = "", stderr = "", incomple
 function formatFailurePanel(explanation, logPath) {
   const lines = ["What went wrong", explanation.trim()].filter(Boolean);
   if (logPath) {
-    lines.push("", `A detailed log was saved to ${logPath}`);
+    const name = String(logPath).split(/[/\\]/).pop() || logPath;
+    lines.push("", `Run log · ${name}`);
   }
   return lines.join("\n");
 }

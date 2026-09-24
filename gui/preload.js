@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("qaPipeline", {
   run: (opts) => ipcRenderer.invoke("pipeline:run", opts),
   cancel: () => ipcRenderer.invoke("pipeline:cancel"),
   repoRoot: () => ipcRenderer.invoke("pipeline:repoRoot"),
+  openPath: (filePath) => ipcRenderer.invoke("pipeline:openPath", filePath),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (patch) => ipcRenderer.invoke("settings:set", patch),
   onEvent: (handler) => {

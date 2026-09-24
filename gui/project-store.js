@@ -180,7 +180,7 @@ function createProjectStore(repoRoot) {
     return listProjects();
   }
 
-  const settingsFile = path.join(repoRoot, ".qa-pipeline", "gui-settings.json");
+  const settingsFile = path.join(repoRoot, "outputs", "gui-settings.json");
   const defaultSettings = { backend: "ollama", model: "qwen3-coder:30b" };
 
   function readSettings() {

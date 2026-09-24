@@ -41,10 +41,11 @@ The GUI window uses the same `pipeline-runner.js`. Launch with `npm run gui` (un
 
 ## Notes
 
-- Defaults to Ollama `qwen3-coder:30b`; switch backend/model in **Settings** (saved for every project).
-- Refine requires the demo app (or your project URL) to be reachable. **Show browser** is on by default so you can complete captchas; uncheck it for headless refine.
-- Latest artifacts are scoped to the canonical steps path, its contents, base URL, and selected spec name. Plans live in `.qa-pipeline/workflows/<workflow-hash>/`; generated specs live under `tests/generated/<workflow-hash>/` so Playwright still discovers them. Re-running the unchanged workflow reuses those paths, while changing its steps or target uses a new scope.
-- Raw CLI output is written to `.qa-pipeline/workflows/<workflow-hash>/logs/<timestamp>.log`. The GUI **Run status** panel shows plain-English progress instead of that dump. If a stage or workflow step fails, the panel explains why in everyday language and points at the saved log.
+- Defaults to Ollama `qwen3-coder:30b`; switch backend/model in **Settings** (saved to `outputs/gui-settings.json`).
+- Refine requires the demo app (or your project URL) to be reachable. **With browser** is selected by default (next to Steps / Logs) so you can complete captchas; choose **Without browser** for headless refine and Playwright.
+- Latest artifacts are scoped to the canonical steps path, its contents, base URL, and selected spec name. Plans live in `outputs/workflows/<workflow-hash>/`; generated specs live under `outputs/tests/<workflow-hash>/` so Playwright still discovers them. Re-running the unchanged workflow reuses those paths, while changing its steps or target uses a new scope.
+- Test step pass/fail history is stored in SQLite at `outputs/qa-results.sqlite`. The **Generated tests** tiles update live while Playwright runs (green pass, red fail) and reload the latest run when you reopen the steps file or click Test again. Earlier runs for the same workflow stay in the table.
+- Raw CLI output is written to `outputs/workflows/<workflow-hash>/logs/<timestamp>.log`. The GUI **Run status** panel shows plain-English progress instead of that dump. If a stage or workflow step fails, the panel explains why in everyday language and points at the saved log.
 - Skipping parse requires that workflow scope's raw action plan before refine or generate can run. Skipping refine makes generate use that raw plan. Skipping generate requires that scope's generated spec before tests can run. The runner fails before invoking a CLI when a prerequisite is missing.
 - Existing root-level plans and specs are left untouched. This update does not migrate or delete them.
 - If the window fails to open in some agent environments, unset `ELECTRON_RUN_AS_NODE` (the `npm run gui` script already does this).

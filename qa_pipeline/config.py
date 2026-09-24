@@ -12,6 +12,7 @@ own app and the whole pipeline follows. See .env.example for the full list.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 # Load a .env file from the current working directory if python-dotenv is
 # installed. It is an optional dependency; without it we simply read the real
@@ -27,6 +28,12 @@ except ImportError:  # pragma: no cover
 # ── defaults ────────────────────────────────────────────────────────────────
 DEFAULT_BASE_URL = "http://localhost:3000"
 DEFAULT_BACKEND = "anthropic"
+
+# Runtime artifacts land under outputs/ (gitignored except .gitkeep).
+OUTPUTS_DIR = Path("outputs")
+DEFAULT_ACTION_PLAN = OUTPUTS_DIR / "plans" / "action_plan.json"
+DEFAULT_REFINED_PLAN = OUTPUTS_DIR / "plans" / "refined_action_plan.json"
+DEFAULT_SPEC = OUTPUTS_DIR / "tests" / "generated.spec.ts"
 
 # Per-backend default model. Model names drift over time; override with --model
 # or the QA_MODEL environment variable whenever these go stale.

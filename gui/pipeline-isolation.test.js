@@ -102,15 +102,15 @@ test("rejects unsafe explicit spec names", async (t) => {
   }
 });
 
-test("generated specs stay below the configured Playwright test directory", async (t) => {
-  // Break caught: generated specs outside tests are skipped by the configured test run.
+test("generated specs stay below the configured Playwright generated-test directory", async (t) => {
+  // Break caught: generated specs outside outputs/tests are skipped by the configured test run.
   const files = fixture();
   t.after(files.cleanup);
   const result = await pathsFor(files.writeSteps("project", "1. Open checkout"), {
     specName: "checkout-flow",
   });
 
-  assert.equal(path.relative(path.join(REPO_ROOT, "tests"), result.specPath).startsWith(".."), false);
+  assert.equal(path.relative(path.join(REPO_ROOT, "outputs", "tests"), result.specPath).startsWith(".."), false);
 });
 
 test("skipped stages require artifacts from the same workflow scope", async (t) => {
@@ -153,9 +153,8 @@ test("generate-only reuses the scoped raw action plan", async (t) => {
   t.after(() => {
     fs.rmSync(path.dirname(scoped.actionPlan), { recursive: true, force: true });
     fs.rmSync(path.dirname(scoped.specPath), { recursive: true, force: true });
-    removeIfEmpty(path.join(REPO_ROOT, ".qa-pipeline", "workflows"));
-    removeIfEmpty(path.join(REPO_ROOT, ".qa-pipeline"));
-    removeIfEmpty(path.join(REPO_ROOT, "tests", "generated"));
+    removeIfEmpty(path.join(REPO_ROOT, "outputs", "workflows"));
+    removeIfEmpty(path.join(REPO_ROOT, "outputs", "tests"));
   });
   fs.mkdirSync(path.dirname(scoped.actionPlan), { recursive: true });
   fs.writeFileSync(scoped.actionPlan, JSON.stringify({
