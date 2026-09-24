@@ -57,9 +57,8 @@ test("incomplete generate is a distinct run result and never starts Playwright",
   t.after(() => {
     fs.rmSync(path.dirname(scoped.actionPlan), { recursive: true, force: true });
     fs.rmSync(path.dirname(scoped.specPath), { recursive: true, force: true });
-    removeIfEmpty(path.join(REPO_ROOT, ".qa-pipeline", "workflows"));
-    removeIfEmpty(path.join(REPO_ROOT, ".qa-pipeline"));
-    removeIfEmpty(path.join(REPO_ROOT, "tests", "generated"));
+    removeIfEmpty(path.join(REPO_ROOT, "outputs", "workflows"));
+    removeIfEmpty(path.join(REPO_ROOT, "outputs", "tests"));
   });
   writePlan(scoped.actionPlan, [{
     step: 1,
@@ -110,9 +109,8 @@ test("complete generate still starts the test stage when requested", async (t) =
   t.after(() => {
     fs.rmSync(path.dirname(scoped.actionPlan), { recursive: true, force: true });
     fs.rmSync(path.dirname(scoped.specPath), { recursive: true, force: true });
-    removeIfEmpty(path.join(REPO_ROOT, ".qa-pipeline", "workflows"));
-    removeIfEmpty(path.join(REPO_ROOT, ".qa-pipeline"));
-    removeIfEmpty(path.join(REPO_ROOT, "tests", "generated"));
+    removeIfEmpty(path.join(REPO_ROOT, "outputs", "workflows"));
+    removeIfEmpty(path.join(REPO_ROOT, "outputs", "tests"));
   });
   writePlan(scoped.actionPlan, [{
     step: 1,

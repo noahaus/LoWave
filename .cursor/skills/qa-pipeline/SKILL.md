@@ -5,7 +5,7 @@ description: Turns numbered English steps into Playwright tests via qa-parse, qa
 
 # QA Pipeline
 
-Three-stage flow: **steps.txt → action_plan.json → refined_action_plan.json → tests/*.spec.ts**.
+Three-stage flow: **steps.txt → outputs/plans/action_plan.json → outputs/plans/refined_action_plan.json → outputs/tests/*.spec.ts**.
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ Progress:
 **1. Parse** (steps → rough plan)
 
 ```bash
-qa-parse <steps.txt> action_plan.json \
+qa-parse <steps.txt> outputs/plans/action_plan.json \
   --base-url http://localhost:3000 \
   --username demo@kestrel.app --password test1234
 ```
@@ -40,7 +40,7 @@ Ollama fallback: add `--backend ollama --model qwen3-coder:30b`.
 **2. Refine** (ground on live DOM — app must be up)
 
 ```bash
-qa-refine --plan action_plan.json --out refined_action_plan.json --url http://localhost:3000
+qa-refine --plan outputs/plans/action_plan.json --out outputs/plans/refined_action_plan.json --url http://localhost:3000
 ```
 
 Same `--backend` / `--model` as parse if needed. Use `--headed` to watch the browser.
@@ -48,13 +48,13 @@ Same `--backend` / `--model` as parse if needed. Use `--headed` to watch the bro
 **3. Generate** (plan → Playwright spec)
 
 ```bash
-qa-generate refined_action_plan.json tests/<name>.spec.ts --base-url http://localhost:3000
+qa-generate outputs/plans/refined_action_plan.json outputs/tests/<name>.spec.ts --base-url http://localhost:3000
 ```
 
 **4. Run**
 
 ```bash
-QA_SLOWMO=0 npx playwright test tests/<name>.spec.ts
+QA_SLOWMO=0 npx playwright test outputs/tests/<name>.spec.ts
 ```
 
 ## Steps files
@@ -69,9 +69,9 @@ QA_SLOWMO=0 npx playwright test tests/<name>.spec.ts
 
 | Goal | Command |
 |------|---------|
-| Skip parse | Hand-edit or reuse `action_plan.json` / `examples/action_plan.json` |
+| Skip parse | Hand-edit or reuse `outputs/plans/action_plan.json` / `examples/action_plan.json` |
 | Skip refine | `qa-generate` still works; locators are weaker |
-| Generate only | `qa-generate examples/refined_action_plan.json tests/generated.spec.ts` |
+| Generate only | `qa-generate examples/refined_action_plan.json outputs/tests/generated.spec.ts` |
 
 Module form if CLIs missing: `python -m qa_pipeline.parse_steps` / `refine_plan` / `generate`.
 
@@ -79,4 +79,4 @@ Module form if CLIs missing: `python -m qa_pipeline.parse_steps` / `refine_plan`
 
 - Credentials: `demo@kestrel.app` / `test1234` (or `QA_USERNAME` / `QA_PASSWORD`)
 - URL: `QA_BASE_URL` or `http://localhost:3000`
-- Write specs under `tests/`; prefer a descriptive name over overwriting `generated.spec.ts` when running a named workflow
+- Write specs under `outputs/tests/`; prefer a descriptive name over overwriting `generated.spec.ts` when running a named workflow

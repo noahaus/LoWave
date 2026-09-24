@@ -3,16 +3,16 @@
 Turn numbered English workflow steps into a runnable [Playwright](https://playwright.dev) test — automatically.
 
 ```
-steps.txt  ──►  parse_steps  ──►  action_plan.json
+steps.txt  ──►  parse_steps  ──►  outputs/plans/action_plan.json
                                        │
                                        ▼
                                   refine_plan   (grounds each step on the live DOM)
                                        │
                                        ▼
-                               refined_action_plan.json
+                               outputs/plans/refined_action_plan.json
                                        │
                                        ▼
-                                   generate      ──►  tests/generated.spec.ts  ──►  npx playwright test
+                                   generate      ──►  outputs/tests/generated.spec.ts  ──►  npx playwright test
 ```
 
 The three stages are independent CLI tools. A text LLM reads your steps file and drafts a rough plan; a second pass walks the *running* app, matches each step to a real element, and emits durable locators; the final stage compiles that into TypeScript.
@@ -63,11 +63,11 @@ read-only filesystem sandbox.
 ```bash
 # Claude Code subscription
 claude auth status
-LLM_BACKEND=claude-cli qa-parse steps.txt action_plan.json
+LLM_BACKEND=claude-cli qa-parse steps.txt outputs/plans/action_plan.json
 
 # ChatGPT / Codex subscription
 codex login status
-LLM_BACKEND=codex-cli qa-parse steps.txt action_plan.json
+LLM_BACKEND=codex-cli qa-parse steps.txt outputs/plans/action_plan.json
 ```
 
 Leave `QA_MODEL` and the GUI's Model field blank to use the selected CLI's
@@ -95,11 +95,11 @@ module.exports.authenticate = async ({ page, baseURL }) => {
 ```
 
 ```bash
-qa-parse steps.txt action_plan.json --runtime-auth
-qa-refine --plan action_plan.json --out refined_action_plan.json \
+qa-parse steps.txt outputs/plans/action_plan.json --runtime-auth
+qa-refine --plan outputs/plans/action_plan.json --out outputs/plans/refined_action_plan.json \
   --auth-hook "$PWD/auth-hook.cjs"
-qa-generate refined_action_plan.json tests/generated.spec.ts --runtime-auth
-QA_AUTH_HOOK="$PWD/auth-hook.cjs" npx playwright test tests/generated.spec.ts
+qa-generate outputs/plans/refined_action_plan.json outputs/tests/generated.spec.ts --runtime-auth
+QA_AUTH_HOOK="$PWD/auth-hook.cjs" npx playwright test outputs/tests/generated.spec.ts
 ```
 
 Hooks are executable local code with the same access as the QA process, so use
@@ -124,7 +124,7 @@ npm run serve                 # serves demo_app/ at http://localhost:3000
 **2. Generate a test from a plan.** A ready-made example plan lives in `examples/`, so you can skip straight to generation:
 
 ```bash
-qa-generate examples/refined_action_plan.json tests/generated.spec.ts
+qa-generate examples/refined_action_plan.json outputs/tests/generated.spec.ts
 ```
 
 **3. Run it:**
@@ -158,26 +158,26 @@ See `examples/kestrel_login_steps.txt` for a copy you can run against the demo a
 
 ```bash
 # Stage 1 — steps.txt → rough plan (needs an LLM)
-qa-parse examples/kestrel_login_steps.txt action_plan.json \
+qa-parse examples/kestrel_login_steps.txt outputs/plans/action_plan.json \
   --base-url http://localhost:3000 \
   --username demo@kestrel.app --password test1234
 
 # Stage 2 — ground the plan against the LIVE app (app must be running)
-qa-refine --plan action_plan.json --out refined_action_plan.json --headed
+qa-refine --plan outputs/plans/action_plan.json --out outputs/plans/refined_action_plan.json --headed
 
 # Stage 3 — compile to a Playwright spec
-qa-generate refined_action_plan.json tests/generated.spec.ts
+qa-generate outputs/plans/refined_action_plan.json outputs/tests/generated.spec.ts
 
 # Run
-npx playwright test tests/generated.spec.ts --headed
+npx playwright test outputs/tests/generated.spec.ts --headed
 ```
 
 If you didn't `pip install`, the same tools run as modules from the repo root:
 
 ```bash
-python -m qa_pipeline.parse_steps examples/kestrel_login_steps.txt action_plan.json
-python -m qa_pipeline.refine_plan --plan action_plan.json --out refined_action_plan.json
-python -m qa_pipeline.generate    refined_action_plan.json tests/generated.spec.ts
+python -m qa_pipeline.parse_steps examples/kestrel_login_steps.txt outputs/plans/action_plan.json
+python -m qa_pipeline.refine_plan --plan outputs/plans/action_plan.json --out outputs/plans/refined_action_plan.json
+python -m qa_pipeline.generate    outputs/plans/refined_action_plan.json outputs/tests/generated.spec.ts
 ```
 
 Run any tool with `--help` for its full flag list.
@@ -211,7 +211,12 @@ The steps LLM cannot see the DOM, so its selectors are guesses. `qa-refine` open
 │   │   └── calendar_create_event.txt
 │   ├── action_plan.json
 │   └── refined_action_plan.json
-├── tests/                  # generated Playwright specs land here
+├── outputs/                # runtime artifacts (gitignored except .gitkeep)
+│   ├── plans/              # CLI default action / refined plans
+│   ├── tests/              # generated Playwright specs
+│   ├── workflows/          # GUI-scoped plans, logs, step-progress
+│   └── playwright/         # Playwright HTML report and test-results
+├── tests/                  # authored Playwright specs and Python unit tests
 ├── e2e/                    # a hand-written example spec
 ├── playwright.config.ts    # testDir + baseURL (from QA_BASE_URL)
 ├── pyproject.toml          # Python packaging + console scripts + extras

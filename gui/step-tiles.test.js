@@ -46,8 +46,8 @@ test("resultsForTestRun marks the failing spec step red and earlier ones green",
   const steps = parseNumberedSteps("1. Open login\n2. Click Sign in\n3. Assert dashboard");
   const results = resultsForTestRun({
     passed: false,
-    output: "Error: Timeout\n    at tests/generated/abc/flow.spec.ts:5:3",
-    specPath: "tests/generated/abc/flow.spec.ts",
+    output: "Error: Timeout\n    at outputs/tests/abc/flow.spec.ts:5:3",
+    specPath: "outputs/tests/abc/flow.spec.ts",
     specText: spec,
     steps,
   });

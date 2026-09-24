@@ -29,7 +29,7 @@ Requires a RUNNING app — DOM grounding needs a live DOM.
 
     pip install -e ".[anthropic]"   # or [openai] / [google] / [ollama]
     playwright install chromium
-    python -m qa_pipeline.refine_plan --plan action_plan.json --out refined_action_plan.json
+    python -m qa_pipeline.refine_plan --plan outputs/plans/action_plan.json --out outputs/plans/refined_action_plan.json
 
 The grounding LLM is provider-agnostic — pick a backend with --backend
 (anthropic | openai | google | ollama) or the LLM_BACKEND env var. Keep
@@ -1876,7 +1876,7 @@ def _serialize(plan, fuzzy_steps, refined_steps, original_by_no, ambiguities, ba
 def main() -> None:
     ap = argparse.ArgumentParser(description="Refine a steps-derived action plan against the live DOM.")
     ap.add_argument("--plan", required=True, help="Path to the input action_plan.json")
-    ap.add_argument("--out", default="refined_action_plan.json", help="Where to write the refined plan")
+    ap.add_argument("--out", default=str(config.DEFAULT_REFINED_PLAN), help="Where to write the refined plan")
     ap.add_argument("--url", default=None, help="Start URL (defaults to workflow.base_url, then $QA_BASE_URL)")
     ap.add_argument("--backend", default=None,
                     choices=config.BACKENDS,
@@ -1905,11 +1905,13 @@ def main() -> None:
         auth_hook=args.auth_hook,
     ))
 
-    with open(args.out, "w", encoding="utf-8") as f:
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(refined, f, indent=2, ensure_ascii=False)
 
     amb = refined["metadata"]["known_ambiguities"]
-    print(f"Wrote {args.out}  ({refined['metadata']['total_steps']} steps)")
+    print(f"Wrote {out_path}  ({refined['metadata']['total_steps']} steps)")
     if amb:
         print(f"\n{len(amb)} item(s) flagged for review:")
         for a in amb:

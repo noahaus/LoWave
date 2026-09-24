@@ -3,8 +3,8 @@
 
 Pipeline:  steps.txt --(text LLM)--> structured plan matching generate.py's schema
 
-    python -m qa_pipeline.parse_steps workflow_steps.txt action_plan.json
-    python -m qa_pipeline.generate    action_plan.json tests/generated.spec.ts
+    python -m qa_pipeline.parse_steps workflow_steps.txt outputs/plans/action_plan.json
+    python -m qa_pipeline.generate    outputs/plans/action_plan.json outputs/tests/generated.spec.ts
 
 The workflow is described entirely by the steps file plus a few settings (the app
 URL and, optionally, login credentials) from the environment or CLI — nothing
@@ -210,7 +210,7 @@ def main():
         description="Numbered English steps.txt -> action_plan.json"
     )
     ap.add_argument("steps", type=Path, help="Path to a .txt file of numbered instructions")
-    ap.add_argument("output", type=Path, nargs="?", default=Path("action_plan.json"))
+    ap.add_argument("output", type=Path, nargs="?", default=config.DEFAULT_ACTION_PLAN)
     ap.add_argument("--backend", default=None,
                     choices=config.BACKENDS,
                     help="LLM provider (default: $LLM_BACKEND or anthropic)")
@@ -285,7 +285,7 @@ def main():
 
     print(f"\n{BOLD}━━━ Done ━━━{RESET}")
     print(f"  ✓ Written to {GREEN}{args.output}{RESET}")
-    print(f"\n  Next:  python -m qa_pipeline.refine_plan --plan {args.output} --out refined_action_plan.json\n")
+    print(f"\n  Next:  python -m qa_pipeline.refine_plan --plan {args.output} --out {config.DEFAULT_REFINED_PLAN}\n")
 
 
 if __name__ == "__main__":

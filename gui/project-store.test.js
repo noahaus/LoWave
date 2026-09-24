@@ -56,7 +56,7 @@ test("settings are stored outside any project directory", () => {
     store.createProject({ name: "Alpha", baseUrl: "http://localhost:3000" });
     store.writeSettings({ backend: "openai", model: "gpt-4.1" });
 
-    const settingsPath = path.join(root, ".qa-pipeline", "gui-settings.json");
+    const settingsPath = path.join(root, "outputs", "gui-settings.json");
     assert.equal(fs.existsSync(settingsPath), true);
     const projectDirs = fs.readdirSync(path.join(root, "projects"), { withFileTypes: true })
       .filter((d) => d.isDirectory());

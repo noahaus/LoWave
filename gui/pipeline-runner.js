@@ -60,13 +60,13 @@ function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName, authHo
     identity.update("\0runtime-auth\0").update(path.resolve(authHook)).update("\0").update(fs.readFileSync(authHook));
   }
   const digest = identity.digest("hex");
-  const workflowDir = path.join(REPO_ROOT, ".qa-pipeline", "workflows", digest);
+  const workflowDir = path.join(REPO_ROOT, "outputs", "workflows", digest);
 
   return {
     workflowDir,
     actionPlan: path.join(workflowDir, "action_plan.json"),
     refinedPlan: path.join(workflowDir, "refined_action_plan.json"),
-    specPath: path.join(REPO_ROOT, "tests", "generated", digest, `${stem}.spec.ts`),
+    specPath: path.join(REPO_ROOT, "outputs", "tests", digest, `${stem}.spec.ts`),
   };
 }
 
