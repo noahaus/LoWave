@@ -14,7 +14,6 @@
 <body>
   <div class="app">
     <header class="hero">
-      <img class="app-icon" src="icon.png" width="56" height="56" alt="LoWave" />
       <h1>LOWAVE</h1>
       <nav class="header-nav" aria-label="App">
         <button type="button" id="homeBtn" class="btn ghost">Home</button>
@@ -112,9 +111,22 @@
                 <h2 id="stepsFileTitle" class="steps-file-title">Steps file</h2>
                 <span id="stagePills" class="pills"></span>
               </div>
-              <div class="pane-toggle-group" role="tablist" aria-label="File contents">
-                <button type="button" id="paneStepsBtn" class="pane-toggle active" role="tab" aria-selected="true">Steps</button>
-                <button type="button" id="paneLogsBtn" class="pane-toggle" role="tab" aria-selected="false">Logs</button>
+              <div class="pane-toolbar">
+                <div class="pane-toggle-group" role="tablist" aria-label="File contents">
+                  <button type="button" id="paneStepsBtn" class="pane-toggle active" role="tab" aria-selected="true">Steps</button>
+                  <button type="button" id="paneLogsBtn" class="pane-toggle" role="tab" aria-selected="false">Logs</button>
+                </div>
+                <fieldset class="browser-mode" aria-label="Run tests in a visible browser">
+                  <legend class="browser-mode-legend">Browser</legend>
+                  <label class="browser-mode-option">
+                    <input type="radio" name="browserMode" id="browserHeaded" value="headed" checked />
+                    With browser
+                  </label>
+                  <label class="browser-mode-option">
+                    <input type="radio" name="browserMode" id="browserHeadless" value="headless" />
+                    Without browser
+                  </label>
+                </fieldset>
               </div>
               <div class="console-pane">
                 <pre id="stepsPreview" class="preview-box" role="tabpanel">Select a steps file to preview.</pre>

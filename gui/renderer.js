@@ -21,7 +21,8 @@ function applyPipelineEvent(evt, ui) {
   }
   if (evt.status === "finished") {
     ui.appendLog("All selected stages finished successfully.");
-    ui.setStatus(`Done → ${evt.result?.specPath || "ok"}`, "ok");
+    appendLogFile(ui, evt.result?.logPath);
+    ui.setStatus("Done", "ok", { filePath: evt.result?.specPath || "" });
     ui.setRunUi(false);
   }
   if (evt.status === "cancelled") {
@@ -29,20 +30,23 @@ function applyPipelineEvent(evt, ui) {
     ui.renderPills();
     ui.setStatus("Cancelled", "warn");
     ui.appendLog(evt.explanation || "The run was cancelled before it finished.");
+    appendLogFile(ui, evt.logPath);
     ui.setRunUi(false);
   }
   if (evt.status === "failed") {
-    ui.setStatus("Failed", "err");
+    ui.setStatus("Failed", "err", { filePath: evt.logPath || "" });
     ui.appendLog("");
     ui.appendLog(failureCopy(evt));
+    appendLogFile(ui, evt.logPath);
     ui.setRunUi(false);
   }
   if (evt.status === "incomplete") {
     ui.markRunningStages("incomplete");
     ui.renderPills();
-    ui.setStatus("Incomplete — needs review", "warn");
+    ui.setStatus("Incomplete — needs review", "warn", { filePath: evt.logPath || "" });
     ui.appendLog("");
     ui.appendLog(failureCopy(evt));
+    appendLogFile(ui, evt.logPath);
     ui.setRunUi(false);
   }
 }
@@ -52,10 +56,12 @@ function failureCopy(evt) {
   const lines = ["What went wrong"];
   if (explanation) lines.push(explanation);
   else lines.push("This step could not finish. Open the saved log file for the technical details.");
-  if (evt.logPath) {
-    lines.push("", `A detailed log was saved to ${evt.logPath}`);
-  }
   return lines.join("\n");
+}
+
+function appendLogFile(ui, logPath) {
+  if (!logPath || !ui?.appendLog) return;
+  ui.appendLog("Run log · ", { filePath: logPath });
 }
 
 const inBrowser = typeof document !== "undefined";
@@ -105,15 +111,23 @@ let currentStepsText = "";
 let currentSpecText = "";
 let currentSpecPath = "";
 let stepStatuses = {};
+let expandedTiles = {};
 let filePane = "steps";
+let statusText = "Idle";
+let statusFilePath = "";
+let logEntries = [];
 
 function defaultFileUi() {
+  const log = "Status updates will appear here when you run Parse or Test.";
   return {
-    log: "Status updates will appear here when you run Parse or Test.",
+    log,
+    logEntries: [{ text: log, filePath: "" }],
     stageState: idleStageState(),
     status: "Idle",
     statusClass: "status",
+    statusFilePath: "",
     stepStatuses: {},
+    expandedTiles: {},
     filePane: "steps",
   };
 }
@@ -133,9 +147,53 @@ function syncBackendModel() {
   suggestedModel = nextSuggestion;
 }
 
-function setStatus(text, cls = "") {
-  statusEl.textContent = text;
+function createFileLink(filePath) {
+  const link = document.createElement("a");
+  link.href = "#";
+  link.className = "status-file-link";
+  link.textContent = stepsFileName(filePath) || filePath;
+  link.title = filePath;
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (window.qaPipeline?.openPath) window.qaPipeline.openPath(filePath);
+  });
+  return link;
+}
+
+function logEntriesFromText(text) {
+  return text ? [{ text: String(text), filePath: "" }] : [];
+}
+
+function logEntriesText(entries) {
+  return (entries || [])
+    .map((entry) => `${entry.text || ""}${entry.filePath ? stepsFileName(entry.filePath) : ""}`)
+    .join("\n");
+}
+
+function renderLogPane(entries = logEntries) {
+  if (!logEl) return;
+  logEl.replaceChildren();
+  entries.forEach((entry, index) => {
+    if (index) logEl.appendChild(document.createTextNode("\n"));
+    if (entry.text) logEl.appendChild(document.createTextNode(entry.text));
+    if (entry.filePath) logEl.appendChild(createFileLink(entry.filePath));
+  });
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text, cls = "", opts = {}) {
+  statusText = text;
+  statusFilePath = opts.filePath || "";
   statusEl.className = `status ${cls}`.trim();
+  const filePath = statusFilePath;
+  const fileLabel = stepsFileName(filePath);
+  if (filePath && fileLabel) {
+    statusEl.replaceChildren();
+    statusEl.append(document.createTextNode(text ? `${text} · ` : ""));
+    statusEl.append(createFileLink(filePath));
+    return;
+  }
+  statusEl.textContent = text;
 }
 
 function setHomeStatus(text, cls = "") {
@@ -182,9 +240,9 @@ function setSaveStatus(text, cls = "") {
   }
 }
 
-function appendLog(line) {
-  logEl.textContent += (logEl.textContent ? "\n" : "") + line;
-  logEl.scrollTop = logEl.scrollHeight;
+function appendLog(line, opts = {}) {
+  logEntries.push({ text: line == null ? "" : String(line), filePath: opts.filePath || "" });
+  renderLogPane();
 }
 
 function setRunUi(running) {
@@ -341,6 +399,7 @@ function showStepsDetail(visible) {
     currentSpecText = "";
     currentSpecPath = "";
     stepStatuses = {};
+    expandedTiles = {};
     if (noTestsHint) noTestsHint.hidden = true;
     if (stepTilesEl) {
       stepTilesEl.hidden = true;
@@ -364,11 +423,14 @@ function setAddStepsFormOpen(open) {
 function snapshotSelectedFile() {
   if (!selectedStepsPath || !statusEl) return;
   fileUi[selectedStepsPath] = {
-    log: logEl.textContent,
+    log: logEntriesText(logEntries),
+    logEntries: logEntries.map((entry) => ({ text: entry.text || "", filePath: entry.filePath || "" })),
     stageState: { ...stageState },
-    status: statusEl.textContent,
+    status: statusText,
     statusClass: statusEl.className,
+    statusFilePath,
     stepStatuses: { ...stepStatuses },
+    expandedTiles: { ...expandedTiles },
     filePane,
   };
 }
@@ -379,10 +441,15 @@ function restoreSelectedFile() {
     stageState[key] = saved.stageState[key] || "idle";
   });
   renderPills();
-  logEl.textContent = saved.log;
-  statusEl.textContent = saved.status;
-  statusEl.className = saved.statusClass;
+  logEntries = Array.isArray(saved.logEntries)
+    ? saved.logEntries.map((entry) => ({ text: entry.text || "", filePath: entry.filePath || "" }))
+    : logEntriesFromText(saved.log);
+  renderLogPane();
+  setStatus(saved.status, String(saved.statusClass || "").replace(/^status\s*/, ""), {
+    filePath: saved.statusFilePath || "",
+  });
   stepStatuses = { ...(saved.stepStatuses || {}) };
+  expandedTiles = { ...(saved.expandedTiles || {}) };
   setFilePane(saved.filePane || "steps");
 }
 
@@ -400,7 +467,8 @@ function uiForRun() {
         Object.keys(stageState).forEach((k) => (stageState[k] = "idle"));
       },
       clearLog() {
-        logEl.textContent = "";
+        logEntries = [];
+        renderLogPane();
       },
     };
   }
@@ -409,9 +477,10 @@ function uiForRun() {
   return {
     stageState: saved.stageState,
     renderPills() {},
-    setStatus(text, cls = "") {
+    setStatus(text, cls = "", opts = {}) {
       saved.status = text;
       saved.statusClass = `status ${cls}`.trim();
+      saved.statusFilePath = opts.filePath || "";
     },
     setRunUi,
     markRunningStages(status) {
@@ -419,14 +488,17 @@ function uiForRun() {
         if (state === "running") saved.stageState[name] = status;
       }
     },
-    appendLog(line) {
-      saved.log += (saved.log ? "\n" : "") + line;
+    appendLog(line, opts = {}) {
+      if (!saved.logEntries) saved.logEntries = logEntriesFromText(saved.log);
+      saved.logEntries.push({ text: line == null ? "" : String(line), filePath: opts.filePath || "" });
+      saved.log = logEntriesText(saved.logEntries);
     },
     resetStages() {
       Object.keys(saved.stageState).forEach((k) => (saved.stageState[k] = "idle"));
     },
     clearLog() {
       saved.log = "";
+      saved.logEntries = [];
     },
   };
 }
@@ -503,7 +575,7 @@ function renderCards(projects) {
       "title",
       `${project.stepsCount} file${project.stepsCount === 1 ? "" : "s"}`
     );
-    btn.addEventListener("click", () => openProject(project.slug));
+    btn.addEventListener("click", () => openProjectFromCard(btn, project.slug));
     projectCards.appendChild(btn);
   }
 }
@@ -534,6 +606,15 @@ function fillProjectForm(project) {
   $("projPassword").value = project.password || "";
 }
 
+function headedFromUi() {
+  if (!inBrowser) return true;
+  const selected = document.querySelector('input[name="browserMode"]:checked');
+  if (selected) return selected.value === "headed";
+  const headed = $("browserHeaded");
+  if (headed) return Boolean(headed.checked);
+  return true;
+}
+
 function currentSpecOpts() {
   return {
     stepsPath: selectedStepsPath,
@@ -553,15 +634,49 @@ function renderStepTiles() {
   }
   for (const tile of tiles) {
     const status = stepStatuses[tile.number] || "idle";
+    const expanded = Boolean(expandedTiles[tile.number]);
+    const snippet = stepTileLib.specSnippetForStep
+      ? stepTileLib.specSnippetForStep(currentSpecText, tile.number)
+      : "";
     const row = document.createElement("div");
-    row.className = "step-tile";
+    row.className = `step-tile${expanded ? " expanded" : ""}`;
+    row.dataset.step = String(tile.number);
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "0");
+    row.setAttribute("aria-expanded", String(expanded));
+    row.setAttribute("aria-label", `Step ${tile.number} ${status}`);
+    const script = snippet
+      ? escapeHtml(snippet)
+      : "No generated Playwright script for this step yet.";
     row.innerHTML = `
-      <span class="step-tile-status ${status}" aria-label="Step ${tile.number} ${status}"></span>
+      <span class="step-tile-status ${status}" aria-hidden="true"></span>
       <div class="step-tile-body">
-        <span class="step-tile-num">${tile.number}.</span>
-        ${escapeHtml(tile.text)}
+        <div class="step-tile-summary">
+          <span class="step-tile-num">${tile.number}.</span>
+          ${escapeHtml(tile.text)}
+        </div>
+        <div class="step-tile-script-wrap">
+          <pre class="step-tile-script">${script}</pre>
+        </div>
       </div>
     `;
+    const toggle = (event) => {
+      const target = event.target && event.target.nodeType === 3
+        ? event.target.parentElement
+        : event.target;
+      if (target && target.closest && target.closest(".step-tile-script")) return;
+      const next = !Boolean(expandedTiles[tile.number]);
+      expandedTiles[tile.number] = next;
+      row.classList.toggle("expanded", next);
+      row.setAttribute("aria-expanded", String(next));
+      snapshotSelectedFile();
+    };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggle(event);
+    });
     stepTilesEl.appendChild(row);
   }
   stepTilesEl.hidden = false;
@@ -580,23 +695,26 @@ function applyTestStepResults(evt) {
   const steps = stepTileLib.buildStepTiles
     ? stepTileLib.buildStepTiles(currentStepsText, specText)
     : [];
+  if (!evt.passed) {
+    renderStepTiles();
+    snapshotSelectedFile();
+    return;
+  }
   const hasLive = Object.values(stepStatuses).some((status) => status === "pass" || status === "fail");
   if (hasLive && stepTileLib.statusesAfterProgress) {
     stepStatuses = stepTileLib.statusesAfterProgress(stepStatuses, {
       status: "test-end",
-      passed: Boolean(evt.passed),
+      passed: true,
       steps,
     });
-    if (evt.passed) {
-      stepStatuses = Object.fromEntries(steps.map((step) => [step.number, "pass"]));
-    }
+    stepStatuses = Object.fromEntries(steps.map((step) => [step.number, "pass"]));
     renderStepTiles();
     snapshotSelectedFile();
     return;
   }
   const results = stepTileLib.resultsForTestRun
     ? stepTileLib.resultsForTestRun({
-        passed: Boolean(evt.passed),
+        passed: true,
         output: evt.output || "",
         specPath: evt.specPath || currentSpecPath,
         specText,
@@ -641,6 +759,9 @@ async function refreshSpecStatus() {
     specExists = Boolean(status.exists);
     currentSpecPath = status.specPath || "";
     currentSpecText = status.content || "";
+    if (!isRunning || runningStepsPath !== selectedStepsPath) {
+      stepStatuses = { ...(status.stepStatuses || {}) };
+    }
     if ($("testsFileTitle")) $("testsFileTitle").textContent = "Generated tests";
   } catch {
     specExists = false;
@@ -698,6 +819,19 @@ async function openProject(slug) {
   showStepsDetail(false);
   renderSteps(currentProject);
   showProject();
+}
+
+let openingProject = false;
+function openProjectFromCard(card, slug) {
+  if (openingProject) return;
+  openingProject = true;
+  card.classList.add("pressed");
+  const delay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 220;
+  window.setTimeout(() => {
+    openProject(slug).finally(() => {
+      openingProject = false;
+    });
+  }, delay);
 }
 
 async function loadSettings() {
@@ -834,9 +968,6 @@ async function init() {
     if (evt.type === "run" && evt.status === "started") {
       if (!runningStepsPath || runningStepsPath === selectedStepsPath) setFilePane("logs");
     }
-    if (evt.type === "stage" && evt.stage === "generate" && (evt.status === "done" || evt.status === "incomplete")) {
-      stepStatuses = {};
-    }
     if (evt.type === "stage" && evt.stage === "test" && evt.status === "running") {
       stepStatuses = {};
       renderStepTiles();
@@ -849,10 +980,6 @@ async function init() {
     }
     if (evt.type === "run" && (evt.status === "finished" || evt.status === "cancelled" || evt.status === "failed" || evt.status === "incomplete")) {
       runningStepsPath = "";
-      if (evt.status === "cancelled") {
-        stepStatuses = {};
-        renderStepTiles();
-      }
       refreshSpecStatus();
     }
   });
@@ -884,7 +1011,7 @@ async function init() {
         refine: parse,
         generate: parse,
         runTests: kind === "test",
-        headed: true,
+        headed: headedFromUi(),
       });
     } catch (err) {
       setStatus(err.message || String(err), "err");
@@ -919,5 +1046,5 @@ if (inBrowser) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { applyPipelineEvent, failureCopy, projectHost };
+  module.exports = { applyPipelineEvent, failureCopy, appendLogFile, projectHost };
 }

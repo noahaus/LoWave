@@ -127,6 +127,7 @@ test("complete generate still starts the test stage when requested", async (t) =
     refine: false,
     generate: true,
     runTests: true,
+    headed: false,
     onEvent: (event) => events.push(event),
   });
 
@@ -204,7 +205,9 @@ test("renderer incomplete event unlocks controls and asks for review", () => {
   assert.equal(ui.stageState.test, "idle");
   assert.match(ui.log, /what went wrong/i);
   assert.match(ui.log, /playwright action/i);
+  assert.match(ui.log, /run log/i);
   assert.doesNotMatch(ui.log, /exited with code 3/);
+  assert.doesNotMatch(ui.log, /\/tmp\/run\.log/);
 });
 
 test("renderer shows parsed English on failure and ignores raw log lines", () => {
@@ -213,11 +216,13 @@ test("renderer shows parsed English on failure and ignores raw log lines", () =>
     log: "",
     status: "",
     statusClass: "",
+    statusOpts: null,
     running: true,
     renderPills() {},
-    setStatus(text, cls = "") {
+    setStatus(text, cls = "", opts = {}) {
       this.status = text;
       this.statusClass = cls;
+      this.statusOpts = opts;
     },
     setRunUi(isRunning) {
       this.running = isRunning;
@@ -251,8 +256,53 @@ test("renderer shows parsed English on failure and ignores raw log lines", () =>
 
   assert.equal(ui.running, false);
   assert.equal(ui.statusClass, "err");
+  assert.equal(ui.statusOpts.filePath, "/tmp/refine.log");
   assert.match(ui.log, /working on step 2 of 8/i);
   assert.match(ui.log, /waited too long/i);
+  assert.match(ui.log, /run log/i);
   assert.doesNotMatch(ui.log, /locator\.click/);
   assert.doesNotMatch(ui.log, /execute_step/);
+  assert.doesNotMatch(ui.log, /\/tmp\/refine\.log/);
+});
+
+test("renderer done status uses a short filename instead of the full spec path", () => {
+  const ui = {
+    stageState: { parse: "done", refine: "done", generate: "done", test: "done" },
+    log: "",
+    status: "",
+    statusClass: "",
+    statusOpts: null,
+    running: true,
+    renderPills() {},
+    setStatus(text, cls = "", opts = {}) {
+      this.status = text;
+      this.statusClass = cls;
+      this.statusOpts = opts;
+    },
+    setRunUi(isRunning) {
+      this.running = isRunning;
+    },
+    markRunningStages() {},
+    appendLog(line, opts = {}) {
+      this.log += line;
+      if (opts.filePath) this.logFilePath = opts.filePath;
+    },
+    resetStages() {},
+    clearLog() {},
+  };
+
+  const specPath =
+    "/Users/noah.legall/DMX_Agent_Sandbox/detailed_webapp_qa_testing/outputs/tests/abc/login_and_search_report.spec.ts";
+  const logPath =
+    "/Users/noah.legall/DMX_Agent_Sandbox/detailed_webapp_qa_testing/outputs/workflows/abc/logs/2026-09-24T17-22-42-229Z.log";
+  applyPipelineEvent({ type: "run", status: "finished", result: { specPath, logPath } }, ui);
+
+  assert.equal(ui.running, false);
+  assert.equal(ui.status, "Done");
+  assert.equal(ui.statusClass, "ok");
+  assert.equal(ui.statusOpts.filePath, specPath);
+  assert.doesNotMatch(ui.status, /Users|outputs\/tests/);
+  assert.match(ui.log, /run log/i);
+  assert.equal(ui.logFilePath, logPath);
+  assert.doesNotMatch(ui.log, /outputs\/workflows/);
 });

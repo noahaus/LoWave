@@ -48,7 +48,7 @@ class LowaveStepReporter {
 
   onStepEnd(_test, _result, step) {
     if (!shouldReportStep(step)) return;
-    if (step && step.error) this._write(payloadFromStep(step, "fail"));
+    this._write(payloadFromStep(step, step && step.error ? "fail" : "pass"));
   }
 
   onTestEnd(_test, result) {

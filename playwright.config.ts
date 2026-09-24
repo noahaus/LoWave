@@ -6,8 +6,11 @@ import fs from 'fs';
 //   QA_BASE_URL=http://localhost:5173 npx playwright test
 const baseURL = process.env.QA_BASE_URL || 'http://localhost:3000';
 
+// GUI Test with "With browser" sets QA_HEADED=1 so Chromium stays visible.
+const headed = process.env.QA_HEADED === '1' || process.env.QA_HEADED === 'true';
+
 // Optional visual slow-motion for demos. Set QA_SLOWMO=0 to disable.
-const slowMo = Number(process.env.QA_SLOWMO ?? 800);
+const slowMo = Number(process.env.QA_SLOWMO ?? (headed ? 800 : 0));
 
 // Generated specs live here; create the dir so the generated project can load
 // even before the first pipeline run.
@@ -22,6 +25,8 @@ export default defineConfig({
   ],
   use: {
     baseURL,
+    // launchOptions.headless would override CLI --headed; only force a window when QA_HEADED is set.
+    ...(headed ? { headless: false } : {}),
     launchOptions: { slowMo },
   },
   projects: [

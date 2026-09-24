@@ -108,9 +108,10 @@ test("explainFailure describes a missing Playwright browser without treating has
   assert.doesNotMatch(explanation, /api key|subscription login/i);
 });
 
-test("formatFailurePanel keeps the log path as a footnote", () => {
+test("formatFailurePanel keeps a short log filename as a footnote", () => {
   const panel = formatFailurePanel("Step 2 could not be completed.", "/tmp/run.log");
   assert.match(panel, /what went wrong/i);
   assert.match(panel, /step 2/i);
-  assert.match(panel, /\/tmp\/run\.log/);
+  assert.match(panel, /run log · run\.log/i);
+  assert.doesNotMatch(panel, /\/tmp\/run\.log/);
 });

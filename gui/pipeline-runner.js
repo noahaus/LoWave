@@ -10,12 +10,23 @@ const {
   statusFromLogLine,
 } = require("./status-messages");
 const {
+  parseNumberedSteps,
+  parseSpecSteps,
   parseReporterLine,
   stepFromReporterPayload,
   wrapSpecInTestSteps,
 } = require("./step-tiles");
+const { createResultsStore } = require("./results-store");
 
 const REPO_ROOT = path.resolve(__dirname, "..");
+const RESULTS_DB_PATH = path.join(REPO_ROOT, "outputs", "qa-results.sqlite");
+
+let defaultStore;
+
+function defaultResultsStore() {
+  if (!defaultStore) defaultStore = createResultsStore(RESULTS_DB_PATH);
+  return defaultStore;
+}
 
 function defaultModelForBackend(backend) {
   return backend === "ollama" ? "qwen3-coder:30b" : undefined;
@@ -63,6 +74,7 @@ function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName, authHo
   const workflowDir = path.join(REPO_ROOT, "outputs", "workflows", digest);
 
   return {
+    workflowHash: digest,
     workflowDir,
     actionPlan: path.join(workflowDir, "action_plan.json"),
     refinedPlan: path.join(workflowDir, "refined_action_plan.json"),
@@ -73,13 +85,13 @@ function workflowPaths(stepsPath, baseUrl, specName, hasExplicitSpecName, authHo
 function specStatus(opts = {}) {
   const stepsPath = opts.stepsPath;
   if (!stepsPath || !fs.existsSync(stepsPath)) {
-    return { specPath: "", exists: false, content: "" };
+    return { specPath: "", exists: false, content: "", workflowHash: "", stepStatuses: {}, lastRun: null };
   }
   const resolvedSteps = path.isAbsolute(stepsPath)
     ? stepsPath
     : path.resolve(process.cwd(), stepsPath);
   const specName = opts.specName;
-  const { specPath } = workflowPaths(
+  const { specPath, workflowHash } = workflowPaths(
     resolvedSteps,
     opts.baseUrl || "http://localhost:3000",
     specName,
@@ -87,10 +99,22 @@ function specStatus(opts = {}) {
     opts.authHook || ""
   );
   const exists = fs.existsSync(specPath);
+  const store = opts.resultsStore || defaultResultsStore();
+  const latest = store.latestResults(workflowHash);
   return {
     specPath,
     exists,
     content: exists ? fs.readFileSync(specPath, "utf8") : "",
+    workflowHash,
+    stepStatuses: latest?.stepStatuses || {},
+    lastRun: latest
+      ? {
+          runId: latest.runId,
+          passed: latest.passed,
+          cancelled: latest.cancelled,
+          finishedAt: latest.finishedAt,
+        }
+      : null,
   };
 }
 
@@ -260,6 +284,10 @@ function runCommand(bin, args, { cwd = REPO_ROOT, env = {}, onLine, signal } = {
 
     const childEnv = { ...process.env, ...env, PYTHONUNBUFFERED: "1" };
     for (const [key, value] of Object.entries(env)) if (value == null) delete childEnv[key];
+    // Electron leaves these set; Playwright Chromium will not show a window if they leak in.
+    delete childEnv.ELECTRON_RUN_AS_NODE;
+    delete childEnv.ELECTRON_NO_ASAR;
+    delete childEnv.ELECTRON_NO_ATTACH_CONSOLE;
     const child = spawn(bin, args, {
       cwd,
       env: childEnv,
@@ -386,13 +414,14 @@ async function runPipeline(opts) {
     throw new Error(`Steps file not found: ${resolvedSteps}`);
   }
 
-  const { workflowDir, actionPlan, refinedPlan, specPath } = workflowPaths(
+  const { workflowDir, actionPlan, refinedPlan, specPath, workflowHash } = workflowPaths(
     resolvedSteps,
     baseUrl,
     specName,
     Object.hasOwn(opts, "specName") && specName !== undefined,
     authHook
   );
+  const resultsStore = opts.resultsStore || defaultResultsStore();
 
   const llmArgs = [];
   if (backend) llmArgs.push("--backend", backend);
@@ -402,6 +431,7 @@ async function runPipeline(opts) {
   let logPath = "";
   let currentStage = "";
   let testSpecText = "";
+  let testRun = null;
 
   try {
     if (!parse && refine && !fs.existsSync(actionPlan)) {
@@ -421,7 +451,7 @@ async function runPipeline(opts) {
     }
 
     if (!runningAny) {
-      return { actionPlan, refinedPlan, specPath };
+      return { actionPlan, refinedPlan, specPath, workflowHash };
     }
 
     fs.mkdirSync(workflowDir, { recursive: true });
@@ -511,12 +541,27 @@ async function runPipeline(opts) {
     if (runTests) {
       appendRunLog(logPath, "==== test ====", "stage");
       emit("test", "running", specPath);
+      appendRunLog(logPath, headed ? "browser: headed" : "browser: headless", "stage");
+      onEvent({
+        type: "status",
+        message: headed
+          ? "Opening a visible browser for this test run."
+          : "Running tests without a browser window.",
+      });
       const originalSpec = fs.existsSync(specPath) ? fs.readFileSync(specPath, "utf8") : "";
       const wrappedSpec = wrapSpecInTestSteps(originalSpec);
       const livePath = wrappedSpec !== originalSpec ? liveSpecPathFor(specPath) : specPath;
       if (livePath !== specPath) fs.writeFileSync(livePath, wrappedSpec);
       const specText = wrappedSpec || originalSpec;
       testSpecText = specText;
+      const fromFile = parseNumberedSteps(fs.readFileSync(resolvedSteps, "utf8"));
+      const fromSpec = parseSpecSteps(specText).map((step) => ({ number: step.number, text: step.text }));
+      testRun = resultsStore.startRun({
+        workflowHash,
+        stepsPath: resolvedSteps,
+        specPath,
+        steps: fromFile.length ? fromFile : fromSpec,
+      });
       const progressPath = path.join(workflowDir, "step-progress.jsonl");
       fs.writeFileSync(progressPath, "");
       const reporterPath = path.join(__dirname, "playwright-step-reporter.js");
@@ -534,6 +579,9 @@ async function runPipeline(opts) {
         }
         const step = stepFromReporterPayload(payload, specText);
         if (!step) return;
+        if (testRun && (payload.status === "running" || payload.status === "pass" || payload.status === "fail")) {
+          resultsStore.setStepStatus(testRun.id, step, payload.status, payload.title);
+        }
         onEvent({
           type: "test-step",
           step,
@@ -554,7 +602,16 @@ async function runPipeline(opts) {
       try {
         await runCommand(
           "npx",
-          ["playwright", "test", livePath, "--reporter", "list", "--reporter", reporterPath],
+          [
+            "playwright",
+            "test",
+            ...(headed ? ["--headed"] : []),
+            "--reporter",
+            "list",
+            "--reporter",
+            reporterPath,
+            livePath,
+          ],
           {
             onLine: (line, stream) => {
               const payload = parseReporterLine(line);
@@ -565,14 +622,18 @@ async function runPipeline(opts) {
               onLine(line, stream);
             },
             env: {
-              QA_SLOWMO: "0",
+              QA_HEADED: headed ? "1" : "0",
+              QA_SLOWMO: headed ? "800" : "0",
               QA_BASE_URL: baseUrl,
               LOWAVE_STEP_EVENTS: progressPath,
+              ...(headed ? { CI: null } : {}),
               ...authEnv,
             },
             signal,
           }
         );
+        resultsStore.finishRun(testRun.id, { passed: true });
+        testRun = null;
         emit("test", "done", specPath);
         onEvent({ type: "test-steps", passed: true, specPath, specText });
       } finally {
@@ -587,8 +648,12 @@ async function runPipeline(opts) {
       }
     }
 
-    return { actionPlan, refinedPlan, specPath, logPath };
+    return { actionPlan, refinedPlan, specPath, logPath, workflowHash };
   } catch (err) {
+    if (testRun) {
+      resultsStore.finishRun(testRun.id, { passed: false, cancelled: Boolean(err?.cancelled) });
+      testRun = null;
+    }
     if (currentStage === "test" && !err?.cancelled) {
       onEvent({
         type: "test-steps",
@@ -623,4 +688,6 @@ module.exports = {
   INCOMPLETE_EXIT_CODE,
   stopChild,
   specStatus,
+  createResultsStore,
+  RESULTS_DB_PATH,
 };

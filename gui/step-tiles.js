@@ -34,6 +34,41 @@ function buildStepTiles(stepsText, specText) {
   }));
 }
 
+function specSnippetForStep(specText, stepNumber) {
+  const lines = String(specText || "").split(/\r?\n/);
+  const number = Number(stepNumber);
+  if (!Number.isFinite(number)) return "";
+  const startRe = new RegExp(`^\\s*//\\s*Step\\s+${number}\\s*:`, "i");
+  const anyStepRe = /^\s*\/\/\s*Step\s+\d+\s*:/i;
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (startRe.test(lines[i])) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (anyStepRe.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  const slice = lines.slice(start, end);
+  while (slice.length && slice[slice.length - 1].trim() === "") slice.pop();
+  const hasTestStep = slice.some((line) => /\btest\.step\s*\(/.test(line));
+  if (hasTestStep) {
+    let closers = 0;
+    for (let i = slice.length - 1; i >= 0 && /^\s*\}\);\s*$/.test(slice[i]); i -= 1) closers += 1;
+    if (closers >= 2) slice.pop();
+  } else if (slice.length > 1 && /^\s*\}\);\s*$/.test(slice[slice.length - 1])) {
+    slice.pop();
+  }
+  while (slice.length && slice[slice.length - 1].trim() === "") slice.pop();
+  return slice.join("\n").trimEnd();
+}
+
 function stepNumberForSpecLine(specText, lineNumber) {
   let current = null;
   for (const step of parseSpecSteps(specText)) {
@@ -120,10 +155,6 @@ function statusesAfterProgress(prev, { step, status, steps, passed }) {
   if (status === "test-end") {
     if (passed) {
       for (const number of numbers) next[number] = "pass";
-    } else {
-      for (const number of numbers) {
-        if (next[number] === "running") next[number] = "fail";
-      }
     }
     return next;
   }
@@ -166,6 +197,7 @@ if (typeof module !== "undefined" && module.exports) {
     parseNumberedSteps,
     parseSpecSteps,
     buildStepTiles,
+    specSnippetForStep,
     stepNumberForSpecLine,
     playwrightErrorLine,
     resultsForTestRun,
@@ -181,6 +213,7 @@ if (typeof window !== "undefined") {
     parseNumberedSteps,
     parseSpecSteps,
     buildStepTiles,
+    specSnippetForStep,
     resultsForTestRun,
     parseReporterLine,
     stepFromReporterPayload,
