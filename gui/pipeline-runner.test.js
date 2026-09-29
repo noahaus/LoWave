@@ -7,7 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { defaultModelForBackend, runCommand, stopChild, specStatus, createResultsStore } = require("./pipeline-runner");
-const { projectHost } = require("./renderer");
+const { projectHost, isReadoutEvent } = require("./renderer");
 
 
 test("specStatus reports a missing Playwright file until one exists", () => {
@@ -114,6 +114,13 @@ test("backend and model live on the settings page, not the project form", () => 
   assert.match(project, /id="projPassword"/);
   assert.match(project, /id="saveProjStatus"/);
   assert.match(project, /class="console-pane"/);
+  assert.match(project, /id="projectTabTests"/);
+  assert.match(project, /id="projectTabReadouts"/);
+  assert.match(project, /id="projectPaneTests"/);
+  assert.match(project, /id="projectPaneReadouts"/);
+  assert.match(project, /id="readoutList"/);
+  assert.match(project, /id="runReadoutBtn"/);
+  assert.match(project, /id="addReadoutBtn"/);
   assert.doesNotMatch(project, /id="specName"/);
   assert.doesNotMatch(project, /id="password"/);
   assert.doesNotMatch(project, /id="backBtn"/);
@@ -122,6 +129,16 @@ test("backend and model live on the settings page, not the project form", () => 
   assert.doesNotMatch(project, /id="doGenerate"/);
   assert.doesNotMatch(project, /Run pipeline/);
   assert.doesNotMatch(project, /Run status/);
+});
+
+test("project workspace tabs sit below the project banner", () => {
+  const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+  const project = html.split('id="view-project"')[1].split('id="view-about"')[0];
+  assert.ok(project.indexOf("project-banner") < project.indexOf("project-tabs"));
+  assert.ok(project.indexOf("project-tabs") < project.indexOf("projectPaneTests"));
+  assert.ok(project.indexOf("projectPaneTests") < project.indexOf("projectPaneReadouts"));
+  assert.match(project, /id="stepsList"/);
+  assert.match(project, /id="readoutName"/);
 });
 
 test("header navigation includes Home, About, and Settings", () => {
@@ -144,8 +161,14 @@ test("project tiles use the hover card and show the URL host", () => {
   assert.match(css, /\.step-tile\.expanded/);
   assert.match(css, /\.step-tile-script-wrap/);
   assert.match(css, /\.status-file-link/);
+  assert.match(css, /\.project-tabs/);
+  assert.match(css, /\.project-tab\.active/);
+  assert.match(css, /\.readout-test-item/);
   assert.equal(projectHost("http://localhost:3000/reports"), "localhost:3000");
   assert.equal(projectHost("not a url"), "not a url");
+  assert.equal(isReadoutEvent({ source: "readout", type: "stage" }), true);
+  assert.equal(isReadoutEvent({ type: "readout-item", status: "started" }), true);
+  assert.equal(isReadoutEvent({ type: "run", status: "started" }), false);
 });
 
 test("cancelling a command also stops its CLI descendants", { skip: process.platform === "win32", timeout: 5000 }, async () => {

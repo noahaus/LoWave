@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const { runPipeline, runEventFromError, specStatus, REPO_ROOT } = require("./pipeline-runner");
 const { createProjectStore } = require("./project-store");
+const { runReadout } = require("./readout-runner");
 
 if (!app || !ipcMain) {
   console.error(
@@ -73,6 +74,31 @@ async function executePipeline(opts) {
   }
 }
 
+async function executeReadout(opts) {
+  if (running) throw new Error("A pipeline run is already in progress");
+  running = true;
+  abortController = new AbortController();
+  try {
+    return await runReadout({
+      items: opts.items,
+      runPipeline,
+      signal: abortController.signal,
+      runOpts: {
+        baseUrl: opts.baseUrl,
+        backend: opts.backend,
+        model: opts.model,
+        username: opts.username,
+        password: opts.password,
+        headed: opts.headed,
+      },
+      onEvent: (evt) => send("pipeline:event", { ...evt, source: "readout", readoutId: opts.readoutId || "" }),
+    });
+  } finally {
+    running = false;
+    abortController = null;
+  }
+}
+
 function cancelPipeline() {
   if (!running || !abortController || abortController.signal.aborted) {
     return { cancelled: false };
@@ -82,7 +108,11 @@ function cancelPipeline() {
 }
 
 function handleIpc(channel, listener) {
-  ipcMain.removeHandler(channel);
+  try {
+    ipcMain.removeHandler(channel);
+  } catch {
+    // Channel may not have a handler yet.
+  }
   ipcMain.handle(channel, listener);
 }
 
@@ -92,6 +122,9 @@ function registerIpc() {
   handleIpc("projects:create", (_e, payload) => store.createProject(payload));
   handleIpc("projects:update", (_e, slug, patch) => store.updateProject(slug, patch));
   handleIpc("projects:addSteps", (_e, slug, payload) => store.addProjectSteps(slug, payload));
+  handleIpc("projects:createReadout", (_e, slug, payload) => store.createReadout(slug, payload));
+  handleIpc("projects:updateReadout", (_e, slug, id, patch) => store.updateReadout(slug, id, patch));
+  handleIpc("projects:deleteReadout", (_e, slug, id) => store.deleteReadout(slug, id));
 
   handleIpc("pipeline:pickSteps", async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -108,6 +141,7 @@ function registerIpc() {
   });
   handleIpc("pipeline:specStatus", (_e, opts) => specStatus(opts));
   handleIpc("pipeline:run", async (_e, opts) => executePipeline(opts));
+  handleIpc("pipeline:runReadout", async (_e, opts) => executeReadout(opts));
   handleIpc("pipeline:cancel", () => cancelPipeline());
   handleIpc("pipeline:repoRoot", () => REPO_ROOT);
   handleIpc("pipeline:openPath", async (_e, filePath) => {
@@ -124,9 +158,8 @@ function registerIpc() {
   handleIpc("settings:set", (_e, patch) => store.writeSettings(patch));
 }
 
-registerIpc();
-
 app.whenReady().then(() => {
+  registerIpc();
   if (process.platform === "darwin" && app.dock) {
     app.dock.setIcon(ICON_PATH);
   }

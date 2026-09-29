@@ -1,0 +1,42 @@
+[
+  {
+    "id": "5036ea3e981b3f93",
+    "name": "smoke test",
+    "stepNames": [
+      "create_expense_report.txt",
+      "login_and_search_report.txt"
+    ],
+    "createdAt": "2026-09-29T05:30:27.780Z",
+    "updatedAt": "2026-09-29T05:31:00.626Z",
+    "lastRun": {
+      "finishedAt": "2026-09-29T05:31:00.625Z",
+      "cancelled": false,
+      "results": [
+        {
+          "name": "create_expense_report.txt",
+          "stepsPath": "/Users/noah.legall/DMX_Agent_Sandbox/detailed_webapp_qa_testing/projects/kestrel-demo/steps/create_expense_report.txt",
+          "status": "passed",
+          "error": "",
+          "logPath": "/Users/noah.legall/DMX_Agent_Sandbox/detailed_webapp_qa_testing/outputs/workflows/4db92f1561516eb5a6dce6f46e300aabbf281e01a90152475623b79900ae65f0/logs/2026-09-29T05-30-55-066Z.log"
+        },
+        {
+          "name": "login_and_search_report.txt",
+          "stepsPath": "/Users/noah.legall/DMX_Agent_Sandbox/detailed_webapp_qa_testing/projects/kestrel-demo/steps/login_and_search_report.txt",
+          "status": "passed",
+          "error": "",
+          "logPath": "/Users/noah.legall/DMX_Agent_Sandbox/detailed_webapp_qa_testing/outputs/workflows/236de441d278ed3cf53a5fbecfd36b5b4b2a7081becfc273de3025fe156b91f6/logs/2026-09-29T05-30-58-062Z.log"
+        }
+      ]
+    }
+  },
+  {
+    "id": "7bb93cd16b8ebad5",
+    "name": "example 2",
+    "stepNames": [
+      "create_expense_report.txt"
+    ],
+    "createdAt": "2026-09-29T05:30:48.690Z",
+    "updatedAt": "2026-09-29T05:30:48.690Z",
+    "lastRun": null
+  }
+]

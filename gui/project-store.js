@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -84,7 +85,136 @@ function createProjectStore(repoRoot) {
     const project = readJson(slug);
     if (!project) return null;
     const steps = listSteps(slug);
-    return { ...project, stepsCount: steps.length, steps };
+    return { ...project, stepsCount: steps.length, steps, readouts: listReadouts(slug) };
+  }
+
+  function readoutsFile(slug) {
+    return path.join(projectDir(slug), "readouts.json");
+  }
+
+  function normalizeReadout(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const id = String(raw.id || "").trim();
+    const name = String(raw.name || "").trim();
+    if (!id || !name) return null;
+    const stepNames = uniqueStepNames(raw.stepNames);
+    return {
+      id,
+      name,
+      stepNames,
+      createdAt: raw.createdAt || "",
+      updatedAt: raw.updatedAt || "",
+      lastRun: normalizeLastRun(raw.lastRun),
+    };
+  }
+
+  function normalizeLastRun(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const results = Array.isArray(raw.results)
+      ? raw.results
+          .map((item) => {
+            if (!item || typeof item !== "object") return null;
+            const name = String(item.name || item.stepsPath || "").trim();
+            const status = String(item.status || "").trim();
+            if (!name || !status) return null;
+            return {
+              name,
+              stepsPath: item.stepsPath ? String(item.stepsPath) : "",
+              status,
+              error: item.error ? String(item.error) : "",
+              logPath: item.logPath ? String(item.logPath) : "",
+            };
+          })
+          .filter(Boolean)
+      : [];
+    return {
+      finishedAt: raw.finishedAt ? String(raw.finishedAt) : "",
+      cancelled: Boolean(raw.cancelled),
+      results,
+    };
+  }
+
+  function uniqueStepNames(stepNames) {
+    const seen = new Set();
+    const out = [];
+    for (const raw of Array.isArray(stepNames) ? stepNames : []) {
+      const name = path.basename(String(raw || "").trim());
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
+    return out;
+  }
+
+  function validateStepNames(slug, names) {
+    const existing = new Set(listSteps(slug).map((step) => step.name));
+    for (const name of names) {
+      if (!existing.has(name)) throw new Error(`Steps file not found: ${name}`);
+    }
+  }
+
+  function listReadouts(slug) {
+    if (!readJson(slug)) throw new Error(`Project not found: ${slug}`);
+    const file = readoutsFile(slug);
+    if (!fs.existsSync(file)) return [];
+    try {
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      return Array.isArray(data) ? data.map(normalizeReadout).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeReadouts(slug, readouts) {
+    if (!readJson(slug)) throw new Error(`Project not found: ${slug}`);
+    fs.writeFileSync(readoutsFile(slug), `${JSON.stringify(readouts, null, 2)}\n`);
+  }
+
+  function createReadout(slug, { name, stepNames } = {}) {
+    const trimmed = name && String(name).trim();
+    if (!trimmed) throw new Error("Readout name is required");
+    const names = uniqueStepNames(stepNames);
+    validateStepNames(slug, names);
+    const readouts = listReadouts(slug);
+    const readout = {
+      id: crypto.randomBytes(8).toString("hex"),
+      name: trimmed,
+      stepNames: names,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastRun: null,
+    };
+    readouts.push(readout);
+    writeReadouts(slug, readouts);
+    return getProject(slug);
+  }
+
+  function updateReadout(slug, id, patch = {}) {
+    const readouts = listReadouts(slug);
+    const index = readouts.findIndex((item) => item.id === id);
+    if (index < 0) throw new Error(`Readout not found: ${id}`);
+    const current = readouts[index];
+    const nextNames = Object.hasOwn(patch, "stepNames") ? uniqueStepNames(patch.stepNames) : current.stepNames;
+    validateStepNames(slug, nextNames);
+    const nextName = patch.name != null ? String(patch.name).trim() : current.name;
+    if (!nextName) throw new Error("Readout name is required");
+    readouts[index] = {
+      ...current,
+      name: nextName,
+      stepNames: nextNames,
+      lastRun: Object.hasOwn(patch, "lastRun") ? normalizeLastRun(patch.lastRun) : current.lastRun,
+      updatedAt: new Date().toISOString(),
+    };
+    writeReadouts(slug, readouts);
+    return getProject(slug);
+  }
+
+  function deleteReadout(slug, id) {
+    const readouts = listReadouts(slug);
+    const next = readouts.filter((item) => item.id !== id);
+    if (next.length === readouts.length) throw new Error(`Readout not found: ${id}`);
+    writeReadouts(slug, next);
+    return getProject(slug);
   }
 
   function listProjects() {
@@ -217,6 +347,10 @@ function createProjectStore(repoRoot) {
     updateProject,
     listSteps,
     addProjectSteps,
+    listReadouts,
+    createReadout,
+    updateReadout,
+    deleteReadout,
     seedDemoIfEmpty,
     readSettings,
     writeSettings,

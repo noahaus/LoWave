@@ -83,6 +83,12 @@
         </div>
       </div>
 
+      <div class="project-tabs" role="tablist" aria-label="Project workspace">
+        <button type="button" id="projectTabTests" class="project-tab active" role="tab" aria-selected="true" aria-controls="projectPaneTests">Tests</button>
+        <button type="button" id="projectTabReadouts" class="project-tab" role="tab" aria-selected="false" aria-controls="projectPaneReadouts">Readouts</button>
+      </div>
+
+      <div id="projectPaneTests" class="project-tab-pane" role="tabpanel" aria-labelledby="projectTabTests">
       <div class="project-body">
         <div class="project-col">
           <section class="panel steps-sidebar">
@@ -161,6 +167,62 @@
           </section>
         </div>
       </div>
+      </div>
+
+      <div id="projectPaneReadouts" class="project-tab-pane" role="tabpanel" aria-labelledby="projectTabReadouts" hidden>
+        <div class="project-body">
+          <div class="project-col">
+            <section class="panel steps-sidebar">
+              <h2>Readouts</h2>
+              <div id="readoutList" class="steps-list"></div>
+              <button type="button" id="addReadoutBtn" class="btn ghost add-steps-btn">+ Create readout</button>
+            </section>
+          </div>
+          <div class="project-col">
+            <section class="panel generated-tests">
+              <div id="readoutEmptyState">
+                <h2>Readouts</h2>
+                <p class="hint">
+                  A readout is a named set of generated tests that you can run together.
+                  Create one, choose the tests to include, then run them one after another.
+                </p>
+              </div>
+              <div id="readoutDetail" hidden>
+                <div class="panel-head">
+                  <h2 id="readoutTitle" class="steps-file-title">New readout</h2>
+                </div>
+                <label class="field">
+                  <span>Readout name</span>
+                  <input id="readoutName" type="text" placeholder="Smoke suite" />
+                </label>
+                <p class="hint">Choose the generated tests to include. Parse a steps file first if it does not have a test yet.</p>
+                <div id="readoutTestList" class="readout-test-list"></div>
+                <div class="pane-toolbar">
+                  <fieldset class="browser-mode" aria-label="Run readout tests in a visible browser">
+                    <legend class="browser-mode-legend">Browser</legend>
+                    <label class="browser-mode-option">
+                      <input type="radio" name="browserMode" id="readoutBrowserHeaded" value="headed" />
+                      With browser
+                    </label>
+                    <label class="browser-mode-option">
+                      <input type="radio" name="browserMode" id="readoutBrowserHeadless" value="headless" />
+                      Without browser
+                    </label>
+                  </fieldset>
+                </div>
+                <div class="actions wrap">
+                  <button type="button" id="saveReadoutBtn" class="btn ghost">Save</button>
+                  <button type="button" id="runReadoutBtn" class="btn primary">Run readout</button>
+                  <button type="button" id="cancelReadoutBtn" class="btn danger" disabled>Cancel</button>
+                  <button type="button" id="deleteReadoutBtn" class="btn ghost" hidden>Delete</button>
+                </div>
+                <p id="readoutStatus" class="status" aria-live="polite">Idle</p>
+                <div id="readoutResults" class="readout-results" hidden></div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section id="view-about" hidden>
@@ -175,8 +237,8 @@
           </p>
           <p class="hint">
             A project holds one website and the step files that belong to it.
-            Open a project, choose a steps file, then use Parse to generate the test
-            and Test to run it. Each generated step shows whether it passed or failed.
+            Open a project and stay on Tests to parse one file and run it.
+            Use Readouts to gather several generated tests and run them together.
           </p>
           <p class="hint">
             Settings choose how LoWave talks to the model that interprets your steps.

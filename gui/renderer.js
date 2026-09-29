@@ -95,6 +95,22 @@ const testBtn = inBrowser ? $("testBtn") : null;
 const cancelBtn = inBrowser ? $("cancelBtn") : null;
 const noTestsHint = inBrowser ? $("noTestsHint") : null;
 const stepTilesEl = inBrowser ? $("stepTiles") : null;
+const projectTabTests = inBrowser ? $("projectTabTests") : null;
+const projectTabReadouts = inBrowser ? $("projectTabReadouts") : null;
+const projectPaneTests = inBrowser ? $("projectPaneTests") : null;
+const projectPaneReadouts = inBrowser ? $("projectPaneReadouts") : null;
+const readoutList = inBrowser ? $("readoutList") : null;
+const readoutEmptyState = inBrowser ? $("readoutEmptyState") : null;
+const readoutDetail = inBrowser ? $("readoutDetail") : null;
+const readoutNameEl = inBrowser ? $("readoutName") : null;
+const readoutTestList = inBrowser ? $("readoutTestList") : null;
+const readoutStatusEl = inBrowser ? $("readoutStatus") : null;
+const readoutResultsEl = inBrowser ? $("readoutResults") : null;
+const addReadoutBtn = inBrowser ? $("addReadoutBtn") : null;
+const saveReadoutBtn = inBrowser ? $("saveReadoutBtn") : null;
+const runReadoutBtn = inBrowser ? $("runReadoutBtn") : null;
+const cancelReadoutBtn = inBrowser ? $("cancelReadoutBtn") : null;
+const deleteReadoutBtn = inBrowser ? $("deleteReadoutBtn") : null;
 
 const idleStageState = () => ({ parse: "idle", refine: "idle", generate: "idle", test: "idle" });
 const stageState = idleStageState();
@@ -116,6 +132,13 @@ let filePane = "steps";
 let statusText = "Idle";
 let statusFilePath = "";
 let logEntries = [];
+let projectTab = "tests";
+let selectedReadoutId = "";
+let readoutDraftNew = false;
+let specByStepsPath = {};
+let readoutItemStatuses = {};
+let readoutLiveResults = [];
+let readoutRunning = false;
 
 function defaultFileUi() {
   const log = "Status updates will appear here when you run Parse or Test.";
@@ -247,9 +270,10 @@ function appendLog(line, opts = {}) {
 
 function setRunUi(running) {
   isRunning = running;
-  parseBtn.disabled = running;
-  testBtn.disabled = running || !specExists;
-  cancelBtn.disabled = !running;
+  if (parseBtn) parseBtn.disabled = running;
+  if (testBtn) testBtn.disabled = running || !specExists;
+  if (cancelBtn) cancelBtn.disabled = !running;
+  syncReadoutRunUi();
 }
 
 function markRunningStages(status) {
@@ -330,6 +354,357 @@ function showProject() {
   hideViews();
   viewProject.hidden = false;
   updateHeaderNav("project");
+}
+
+function setProjectTab(tab) {
+  projectTab = tab === "readouts" ? "readouts" : "tests";
+  const showTests = projectTab === "tests";
+  if (projectPaneTests) projectPaneTests.hidden = !showTests;
+  if (projectPaneReadouts) projectPaneReadouts.hidden = showTests;
+  if (projectTabTests) {
+    projectTabTests.classList.toggle("active", showTests);
+    projectTabTests.setAttribute("aria-selected", String(showTests));
+  }
+  if (projectTabReadouts) {
+    projectTabReadouts.classList.toggle("active", !showTests);
+    projectTabReadouts.setAttribute("aria-selected", String(!showTests));
+  }
+}
+
+function setReadoutStatus(text, cls = "") {
+  if (!readoutStatusEl) return;
+  readoutStatusEl.textContent = text;
+  readoutStatusEl.className = `status ${cls}`.trim();
+}
+
+function showReadoutDetail(visible) {
+  if (readoutEmptyState) readoutEmptyState.hidden = visible;
+  if (readoutDetail) readoutDetail.hidden = !visible;
+  if (!visible) {
+    selectedReadoutId = "";
+    readoutDraftNew = false;
+    readoutItemStatuses = {};
+    readoutLiveResults = [];
+    if (readoutNameEl) readoutNameEl.value = "";
+    if (readoutTestList) readoutTestList.innerHTML = "";
+    if (readoutResultsEl) {
+      readoutResultsEl.hidden = true;
+      readoutResultsEl.innerHTML = "";
+    }
+    if (deleteReadoutBtn) deleteReadoutBtn.hidden = true;
+    setReadoutStatus("Idle");
+  }
+}
+
+function currentReadouts() {
+  return currentProject && Array.isArray(currentProject.readouts) ? currentProject.readouts : [];
+}
+
+function readoutById(id) {
+  return currentReadouts().find((item) => item.id === id) || null;
+}
+
+function selectedReadoutStepNames() {
+  if (!readoutTestList) return [];
+  return Array.from(readoutTestList.querySelectorAll('input[type="checkbox"]:checked')).map(
+    (input) => input.value
+  );
+}
+
+function selectedReadoutItems() {
+  if (!currentProject) return [];
+  const names = new Set(selectedReadoutStepNames());
+  return (currentProject.steps || [])
+    .filter((step) => names.has(step.name) && specByStepsPath[step.path]?.exists)
+    .map((step) => ({ name: step.name, stepsPath: step.path }));
+}
+
+function readoutSummary(readout) {
+  const results = readout?.lastRun?.results || [];
+  if (results.length) {
+    const passed = results.filter((item) => item.status === "passed").length;
+    return `${passed}/${results.length} passed`;
+  }
+  const count = (readout?.stepNames || []).length;
+  return count ? `${count} test${count === 1 ? "" : "s"}` : "No tests yet";
+}
+
+function lastRunLabel(stepPath) {
+  const live = readoutItemStatuses[stepPath];
+  if (live) {
+    if (live === "started") return "Running…";
+    if (live === "passed") return "Passed";
+    if (live === "failed") return "Failed";
+    if (live === "cancelled") return "Cancelled";
+  }
+  const last = specByStepsPath[stepPath]?.lastRun;
+  if (!last) return "";
+  if (last.cancelled) return "Last run cancelled";
+  if (last.passed) return "Last run passed";
+  if (last.passed === false) return "Last run failed";
+  return "";
+}
+
+function renderReadouts() {
+  if (!readoutList) return;
+  readoutList.innerHTML = "";
+  const readouts = currentReadouts();
+  if (!readouts.length && !readoutDraftNew) {
+    const empty = document.createElement("p");
+    empty.className = "steps-empty";
+    empty.textContent = "No readouts yet.";
+    readoutList.appendChild(empty);
+    return;
+  }
+  if (readoutDraftNew) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "steps-item active";
+    btn.textContent = "New readout";
+    readoutList.appendChild(btn);
+  }
+  for (const readout of readouts) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "steps-item" + (!readoutDraftNew && readout.id === selectedReadoutId ? " active" : "");
+    btn.textContent = readout.name;
+    btn.title = readoutSummary(readout);
+    btn.addEventListener("click", () => loadReadout(readout.id));
+    readoutList.appendChild(btn);
+  }
+}
+
+function renderReadoutTests(stepNames) {
+  if (!readoutTestList || !currentProject) return;
+  const selected = new Set(stepNames || selectedReadoutStepNames());
+  readoutTestList.innerHTML = "";
+  if (!currentProject.steps.length) {
+    const empty = document.createElement("p");
+    empty.className = "steps-empty";
+    empty.textContent = "Add a steps file on the Tests tab first.";
+    readoutTestList.appendChild(empty);
+    syncReadoutRunUi();
+    return;
+  }
+  for (const step of currentProject.steps) {
+    const spec = specByStepsPath[step.path] || {};
+    const hasTest = Boolean(spec.exists);
+    const row = document.createElement("label");
+    row.className = "readout-test-item" + (hasTest ? "" : " missing");
+    const meta = hasTest
+      ? lastRunLabel(step.path) || "Ready to run"
+      : "No generated test yet — Parse this file first";
+    row.innerHTML = `
+      <input type="checkbox" value="${escapeHtml(step.name)}" ${selected.has(step.name) ? "checked" : ""} />
+      <span class="readout-test-body">
+        <span class="readout-test-name">${escapeHtml(step.name)}</span>
+        <span class="readout-test-meta">${escapeHtml(meta)}</span>
+      </span>
+    `;
+    const checkbox = row.querySelector("input");
+    checkbox.addEventListener("change", () => {
+      syncReadoutRunUi();
+    });
+    readoutTestList.appendChild(row);
+  }
+  syncReadoutRunUi();
+}
+
+function renderReadoutResults(results) {
+  if (!readoutResultsEl) return;
+  const rows = Array.isArray(results) ? results : [];
+  if (!rows.length) {
+    readoutResultsEl.hidden = true;
+    readoutResultsEl.innerHTML = "";
+    return;
+  }
+  readoutResultsEl.hidden = false;
+  readoutResultsEl.replaceChildren();
+  for (const item of rows) {
+    const status = item.status || readoutItemStatuses[item.stepsPath] || "idle";
+    const row = document.createElement("div");
+    row.className = "readout-result-row";
+    const copy = document.createElement("div");
+    copy.className = "readout-result-copy";
+    const title = document.createElement("div");
+    title.textContent = `${item.name || stepsFileName(item.stepsPath)} · ${status}`;
+    copy.appendChild(title);
+    if (item.error) {
+      const err = document.createElement("div");
+      err.className = "readout-result-error";
+      err.textContent = item.error;
+      copy.appendChild(err);
+    }
+    if (item.logPath) {
+      copy.appendChild(createFileLink(item.logPath));
+    }
+    const marker = document.createElement("span");
+    marker.className = `step-tile-status ${status === "passed" ? "pass" : status === "failed" ? "fail" : status === "started" ? "running" : ""}`;
+    marker.setAttribute("aria-hidden", "true");
+    row.appendChild(marker);
+    row.appendChild(copy);
+    readoutResultsEl.appendChild(row);
+  }
+}
+
+function syncReadoutRunUi() {
+  const runnable = selectedReadoutItems().length > 0;
+  if (runReadoutBtn) runReadoutBtn.disabled = isRunning || !runnable;
+  if (cancelReadoutBtn) cancelReadoutBtn.disabled = !readoutRunning;
+  if (saveReadoutBtn) saveReadoutBtn.disabled = readoutRunning;
+  if (deleteReadoutBtn) deleteReadoutBtn.disabled = readoutRunning;
+  if (addReadoutBtn) addReadoutBtn.disabled = readoutRunning;
+}
+
+async function refreshReadoutSpecs() {
+  specByStepsPath = {};
+  if (!currentProject || !window.qaPipeline?.specStatus) return;
+  const baseUrl = $("projBaseUrl").value.trim() || "http://localhost:3000";
+  await Promise.all(
+    (currentProject.steps || []).map(async (step) => {
+      try {
+        specByStepsPath[step.path] = await window.qaPipeline.specStatus({
+          stepsPath: step.path,
+          baseUrl,
+        });
+      } catch {
+        specByStepsPath[step.path] = { exists: false };
+      }
+    })
+  );
+}
+
+function startNewReadout() {
+  selectedReadoutId = "";
+  readoutDraftNew = true;
+  readoutItemStatuses = {};
+  readoutLiveResults = [];
+  if (readoutNameEl) readoutNameEl.value = "";
+  if ($("readoutTitle")) $("readoutTitle").textContent = "New readout";
+  if (deleteReadoutBtn) deleteReadoutBtn.hidden = true;
+  showReadoutDetail(true);
+  renderReadoutTests([]);
+  renderReadoutResults([]);
+  renderReadouts();
+  setReadoutStatus("Name this readout, then choose tests to include.");
+  if (readoutNameEl) readoutNameEl.focus();
+}
+
+function loadReadout(id) {
+  const readout = readoutById(id);
+  if (!readout) return;
+  selectedReadoutId = id;
+  readoutDraftNew = false;
+  readoutItemStatuses = {};
+  readoutLiveResults = readout.lastRun?.results || [];
+  if (readoutNameEl) readoutNameEl.value = readout.name;
+  if ($("readoutTitle")) $("readoutTitle").textContent = readout.name;
+  if (deleteReadoutBtn) deleteReadoutBtn.hidden = false;
+  showReadoutDetail(true);
+  renderReadoutTests(readout.stepNames);
+  renderReadoutResults(readout.lastRun?.results || []);
+  renderReadouts();
+  setReadoutStatus(readoutSummary(readout));
+}
+
+async function persistReadout() {
+  if (!currentProject) return null;
+  const name = readoutNameEl ? readoutNameEl.value.trim() : "";
+  if (!name) {
+    setReadoutStatus("Name the readout first", "err");
+    return null;
+  }
+  const stepNames = selectedReadoutStepNames();
+  try {
+    if (readoutDraftNew || !selectedReadoutId) {
+      const before = new Set(currentReadouts().map((item) => item.id));
+      currentProject = await window.qaPipeline.createReadout(currentProject.slug, { name, stepNames });
+      const created = currentReadouts().find((item) => !before.has(item.id));
+      selectedReadoutId = created ? created.id : "";
+      readoutDraftNew = false;
+    } else {
+      currentProject = await window.qaPipeline.updateReadout(currentProject.slug, selectedReadoutId, {
+        name,
+        stepNames,
+      });
+    }
+    if ($("readoutTitle")) $("readoutTitle").textContent = name;
+    if (deleteReadoutBtn) deleteReadoutBtn.hidden = !selectedReadoutId;
+    renderReadouts();
+    setReadoutStatus("Saved", "ok");
+    return selectedReadoutId;
+  } catch (err) {
+    const message = err.message || String(err);
+    setReadoutStatus(
+      /No handler registered/.test(message)
+        ? "Quit LoWave fully and start it again. Reloading the window does not load readout support."
+        : message,
+      "err"
+    );
+    return null;
+  }
+}
+
+function isReadoutEvent(evt) {
+  return Boolean(evt && (evt.source === "readout" || evt.type === "readout" || evt.type === "readout-item"));
+}
+
+function applyReadoutEvent(evt) {
+  if (evt.type === "readout" && evt.status === "started") {
+    readoutRunning = true;
+    setRunUi(true);
+    readoutItemStatuses = {};
+    readoutLiveResults = (evt.items || []).map((item) => ({ ...item, status: "idle" }));
+    for (const item of readoutLiveResults) {
+      readoutItemStatuses[item.stepsPath] = "idle";
+    }
+    renderReadoutResults(readoutLiveResults);
+    setReadoutStatus("Running readout…", "running");
+    return;
+  }
+  if (evt.type === "readout-item") {
+    if (evt.stepsPath) readoutItemStatuses[evt.stepsPath] = evt.status;
+    const index = readoutLiveResults.findIndex((item) => item.stepsPath === evt.stepsPath);
+    const next = {
+      name: evt.name,
+      stepsPath: evt.stepsPath,
+      status: evt.status,
+      error: evt.error || "",
+      logPath: evt.logPath || "",
+    };
+    if (index >= 0) readoutLiveResults[index] = { ...readoutLiveResults[index], ...next };
+    else readoutLiveResults.push(next);
+    renderReadoutResults(readoutLiveResults);
+    renderReadoutTests();
+    if (evt.status === "started") setReadoutStatus(`Running ${evt.name || stepsFileName(evt.stepsPath)}…`, "running");
+    return;
+  }
+  if (evt.type === "readout" && (evt.status === "finished" || evt.status === "cancelled")) {
+    readoutRunning = false;
+    setRunUi(false);
+    readoutLiveResults = evt.results || [];
+    renderReadoutResults(readoutLiveResults);
+    const passed = (evt.results || []).filter((item) => item.status === "passed").length;
+    const total = (evt.results || []).length;
+    if (evt.status === "cancelled") setReadoutStatus(`Cancelled · ${passed}/${total} passed`, "warn");
+    else setReadoutStatus(`${passed}/${total} passed`, passed === total ? "ok" : "warn");
+    if (currentProject && selectedReadoutId && !readoutDraftNew) {
+      window.qaPipeline
+        .updateReadout(currentProject.slug, selectedReadoutId, {
+          lastRun: {
+            finishedAt: new Date().toISOString(),
+            cancelled: evt.status === "cancelled",
+            results: evt.results || [],
+          },
+        })
+        .then((project) => {
+          currentProject = project;
+          renderReadouts();
+        })
+        .catch(() => {});
+    }
+    refreshReadoutSpecs().then(() => renderReadoutTests());
+  }
 }
 
 function showAbout() {
@@ -818,6 +1193,9 @@ async function openProject(slug) {
   setAddStepsFormOpen(false);
   showStepsDetail(false);
   renderSteps(currentProject);
+  showReadoutDetail(false);
+  setProjectTab("tests");
+  renderReadouts();
   showProject();
 }
 
@@ -963,7 +1341,85 @@ async function init() {
   paneStepsBtn.addEventListener("click", () => setFilePane("steps"));
   paneLogsBtn.addEventListener("click", () => setFilePane("logs"));
 
+  projectTabTests.addEventListener("click", () => setProjectTab("tests"));
+  projectTabReadouts.addEventListener("click", async () => {
+    setProjectTab("readouts");
+    await refreshReadoutSpecs();
+    renderReadouts();
+    if (readoutDraftNew || selectedReadoutId) renderReadoutTests();
+  });
+  addReadoutBtn.addEventListener("click", async () => {
+    await refreshReadoutSpecs();
+    startNewReadout();
+  });
+  saveReadoutBtn.addEventListener("click", () => persistReadout());
+  deleteReadoutBtn.addEventListener("click", async () => {
+    if (!currentProject) return;
+    if (readoutDraftNew || !selectedReadoutId) {
+      showReadoutDetail(false);
+      renderReadouts();
+      return;
+    }
+    const readout = readoutById(selectedReadoutId);
+    const label = readout?.name || "this readout";
+    if (typeof window.confirm === "function" && !window.confirm(`Delete ${label}?`)) return;
+    try {
+      currentProject = await window.qaPipeline.deleteReadout(currentProject.slug, selectedReadoutId);
+      showReadoutDetail(false);
+      renderReadouts();
+      setReadoutStatus("Deleted", "ok");
+    } catch (err) {
+      setReadoutStatus(err.message || String(err), "err");
+    }
+  });
+  runReadoutBtn.addEventListener("click", async () => {
+    if (!currentProject) {
+      setReadoutStatus("Open a project first", "err");
+      return;
+    }
+    const items = selectedReadoutItems();
+    if (!items.length) {
+      setReadoutStatus("Choose at least one generated test", "warn");
+      return;
+    }
+    const savedId = await persistReadout();
+    if (!savedId) return;
+    readoutRunning = true;
+    setRunUi(true);
+    try {
+      await window.qaPipeline.runReadout({
+        readoutId: savedId,
+        items,
+        baseUrl: $("projBaseUrl").value.trim(),
+        backend: $("backend").value,
+        model: $("model").value.trim(),
+        username: $("projUsername").value.trim(),
+        password: $("projPassword").value,
+        headed: headedFromUi(),
+      });
+    } catch (err) {
+      readoutRunning = false;
+      setRunUi(false);
+      setReadoutStatus(err.message || String(err), "err");
+    }
+  });
+  cancelReadoutBtn.addEventListener("click", async () => {
+    cancelReadoutBtn.disabled = true;
+    try {
+      await window.qaPipeline.cancel();
+      setReadoutStatus("Cancelling…", "running");
+    } catch (err) {
+      setReadoutStatus(err.message || String(err), "err");
+      readoutRunning = false;
+      setRunUi(false);
+    }
+  });
+
   window.qaPipeline.onEvent((evt) => {
+    if (isReadoutEvent(evt)) {
+      applyReadoutEvent(evt);
+      return;
+    }
     applyPipelineEvent(evt, uiForRun());
     if (evt.type === "run" && evt.status === "started") {
       if (!runningStepsPath || runningStepsPath === selectedStepsPath) setFilePane("logs");
@@ -1046,5 +1502,5 @@ if (inBrowser) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { applyPipelineEvent, failureCopy, appendLogFile, projectHost };
+  module.exports = { applyPipelineEvent, failureCopy, appendLogFile, projectHost, isReadoutEvent };
 }
